@@ -39,7 +39,7 @@ const sqlConfig = {
 // 🖥️ ENDPOINT REAL DE HEALTH CHECK (Testing de Base de Datos de la Rúbrica)
 // ============================================================================
 app.get('/api/status', async (req, res) => {
-  const inicio = performance.now();
+  const inicio = Date.now();
   
   try {
     // Intenta abrir una conexión real al pool de Azure SQL Server
@@ -48,7 +48,7 @@ app.get('/api/status', async (req, res) => {
     // Ejecuta una consulta de verificación ultra ligera directamente en el motor de Azure
     await pool.request().query('SELECT 1 AS alive');
     
-    const fin = performance.now();
+    const fin = Date.now();
     const latencia = Math.round(fin - inicio);
 
     // Cierra la conexión de forma limpia para evitar fugas de memoria (no bloquear el servidor)
@@ -64,7 +64,7 @@ app.get('/api/status', async (req, res) => {
     });
 
   } catch (error) {
-    const fin = performance.now();
+    const fin = Date.now();
     const latencia = Math.round(fin - inicio);
     
     // Asegura cerrar el pool si falló a mitad del camino
