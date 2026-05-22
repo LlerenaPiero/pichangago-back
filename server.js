@@ -5,7 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 require('dotenv').config();
-
+const intentosUsuarios = {};
 const app = express();
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -142,19 +142,32 @@ app.post('/api/register', async (req, res) => {
 });
 
 // ============================================================================
-// 🚀 ENDPOINT 2: LOGIN DE USUARIOS (M1 - Autenticación y Registro)
+// 🚀 ENDPOINT 2: LOGIN DE USUARIOS CON CONTROL DE INTENTOS Y DOBLE TOKEN
 // ============================================================================
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
 
   try {
-    // Conectar a Azure SQL Server
-    let pool = await sql.connect(sqlConfig);
+    const ahora = Date.now();
 
-    // 1. Consultar si existe el correo electrónico ingresado
+    // 1. Verificar si el correo ya está penalizado en la memoria RAM (15 minutos de espera)
+    if (intentosUsuarios[email] && intentosUsuarios[email].intentos >= 3) {
+      const tiempoBloqueado = (ahora - intentosUsuarios[email].fechaBloqueo) / 1000 / 60; // Minutos transcurridos
+      
+      if (tiempoBloqueado < 15) {
+        const minutosRestantes = Math.ceil(15 - tiempoBloqueado);
+        return res.status(403).json({ error: `Demasiados intentos. Cuenta bloqueada temporalmente. Intenta en ${minutosRestantes} minutes.` });
+      } else {
+        // Ya cumplió su penalidad de tiempo, le limpiamos el historial para que vuelva a intentar
+        delete intentosUsuarios[email];
+      }
+    }
+
+    // 2. Consultar si existe el usuario en la base de datos Azure SQL Server
+    let pool = await sql.connect(sqlConfig);
     const result = await pool.request()
       .input('email', sql.VarChar(100), email)
-      .query('SELECT ID_USER, EMAIL, PSW_HSH, NOMBRE, ROL, ESTADO FROM Usuario WHERE EMAIL = @email');
+      .query('SELECT ID_USER, EMAIL, PSW_HSH, NOMBRE, ROL FROM Usuario WHERE EMAIL = @email');
 
     if (result.recordset.length === 0) {
       await sql.close().catch(() => {});
@@ -163,28 +176,45 @@ app.post('/api/login', async (req, res) => {
 
     const usuarioEncontrado = result.recordset[0];
 
-    // 2. Desencriptar y comparar la contraseña provista con la almacenada en la DB
+    // 3. Desencriptar y comparar la contraseña provista con la almacenada en la DB
     const contrasenaCorrecta = await bcrypt.compare(password, usuarioEncontrado.PSW_HSH);
+    
     if (!contrasenaCorrecta) {
       await sql.close().catch(() => {});
-      return res.status(401).json({ error: 'Credenciales de acceso incorrectas.' });
+
+      // ❌ CONTRASEÑA INCORRECTA: Registramos la falla en la memoria RAM del proceso Node
+      if (!intentosUsuarios[email]) {
+        intentosUsuarios[email] = { intentos: 1, fechaBloqueo: null };
+      } else {
+        intentosUsuarios[email].intentos += 1;
+      }
+
+      const fallas = intentosUsuarios[email].intentos;
+
+      if (fallas >= 3) {
+        intentosUsuarios[email].fechaBloqueo = ahora; // Guardamos el momento exacto del bloqueo
+        return res.status(401).json({ error: 'Has agotado tus 3 intentos. Tu cuenta ha sido bloqueada por 15 minutos.' });
+      }
+
+      return res.status(401).json({ error: `Credenciales incorrectas. Te quedan ${3 - fallas} intentos antes del bloqueo.` });
     }
 
-    // 3. Generar Tokens (Access y Refresh) blindados
+    // CONTRASEÑA CORRECTA: Limpiamos su historial en la RAM de inmediato
+    delete intentosUsuarios[email];
+
+    // 4. Generación Criptográfica Dual de Llaves JWT
     const tokenPayload = {
       id: usuarioEncontrado.ID_USER.trim(),
       rol: usuarioEncontrado.ROL,
       nombre: usuarioEncontrado.NOMBRE
     };
 
-    // Token de acceso rápido (Dura 15 minutos)
     const accessToken = jwt.sign(
       tokenPayload, 
       process.env.JWT_SECRET || 'clave_secreta_local_desarrollo', 
       { expiresIn: '15m' }
     );
 
-    // Token de renovación silenciosa (Dura 7 días)
     const refreshToken = jwt.sign(
       tokenPayload,
       process.env.REFRESH_TOKEN_SECRET || 'clave_super_secreta_para_refresh_2026',
@@ -193,12 +223,12 @@ app.post('/api/login', async (req, res) => {
 
     await sql.close();
 
-    // 4. Retornar ambos tokens a React
+    // Retorno formal estructurado para consumo del cliente React
     res.status(200).json({
       status: 'success',
       mensaje: 'Autenticación válida',
-      token: accessToken, // El de uso rápido
-      refreshToken: refreshToken, // La llave maestra secreta
+      token: accessToken,
+      refreshToken: refreshToken,
       usuario: {
         id: usuarioEncontrado.ID_USER.trim(),
         nombre: usuarioEncontrado.NOMBRE,
@@ -207,7 +237,7 @@ app.post('/api/login', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error detallado en login:', error);
+    console.error('Error en flujo de login:', error);
     await sql.close().catch(() => {});
     res.status(500).json({ error: 'Fallo interno en el proceso de autenticación del servidor.' });
   }
