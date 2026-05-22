@@ -7,6 +7,7 @@ const nodemailer = require('nodemailer');
 require('dotenv').config();
 const intentosUsuarios = {};
 const app = express();
+const listaNegraTokens = new Set();
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
@@ -341,6 +342,23 @@ app.post('/api/reset-password', async (req, res) => {
   }
 });
 
+// ============================================================================
+// 🚪 ENDPOINT: LOGOUT GLOBAL - INVALIDACIÓN DE REFRESH TOKEN
+// ============================================================================
+app.post('/api/logout', (req, res) => {
+  const { refreshToken } = req.body;
+
+  if (refreshToken) {
+    // Registramos la llave maestra en la lista negra para destruirla globalmente
+    listaNegraTokens.add(refreshToken);
+  }
+
+  res.status(200).json({ 
+    status: 'success', 
+    mensaje: 'Sesión invalidada de forma global con éxito.' 
+  });
+});
+
 // ==========================================
 // 🛡️ ENDPOINT 5: REFRESH TOKEN (Genera un nuevo acceso sin pedir contraseña) - HU-06
 // ==========================================
@@ -351,7 +369,9 @@ app.post('/api/refresh', (req, res) => {
   if (!refreshToken) {
     return res.status(401).json({ error: 'Acceso denegado: No se proporcionó un Refresh Token.' });
   }
-
+if (listaNegraTokens.has(refreshToken)) {
+    return res.status(403).json({ error: 'Esta sesión ya fue cerrada en otro dispositivo o pestaña.' });
+  }
   try {
     // Verificamos si la "llave maestra" sigue siendo válida y no ha sido alterada
     const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET || 'clave_super_secreta_para_refresh_2026');
