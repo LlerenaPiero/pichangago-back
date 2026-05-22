@@ -170,28 +170,35 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).json({ error: 'Credenciales de acceso incorrectas.' });
     }
 
-    // 3. Generar el Token JWT con carga útil (Payload) no vulnerable
+    // 3. Generar Tokens (Access y Refresh) blindados
     const tokenPayload = {
-      id: usuarioEncontrado.ID_USER.trim(), // Limpia los espacios en blanco del CHAR(10)
+      id: usuarioEncontrado.ID_USER.trim(),
       rol: usuarioEncontrado.ROL,
       nombre: usuarioEncontrado.NOMBRE
     };
 
-    // Firmar token con tiempo de expiración estándar (8 horas para una sesión de trabajo)
-    const tokenJwt = jwt.sign(
+    // Token de acceso rápido (Dura 15 minutos)
+    const accessToken = jwt.sign(
       tokenPayload, 
       process.env.JWT_SECRET || 'clave_secreta_local_desarrollo', 
-      { expiresIn: '8h' }
+      { expiresIn: '15m' }
     );
 
-    // Cerrar la instancia de conexión remota de manera limpia
+    // Token de renovación silenciosa (Dura 7 días)
+    const refreshToken = jwt.sign(
+      tokenPayload,
+      process.env.REFRESH_TOKEN_SECRET || 'clave_super_secreta_para_refresh_2026',
+      { expiresIn: '7d' }
+    );
+
     await sql.close();
 
-    // 4. Retornar el token y la metadata de control para los Guards/Protected Routes de React
+    // 4. Retornar ambos tokens a React
     res.status(200).json({
       status: 'success',
       mensaje: 'Autenticación válida',
-      token: tokenJwt,
+      token: accessToken, // El de uso rápido
+      refreshToken: refreshToken, // La llave maestra secreta
       usuario: {
         id: usuarioEncontrado.ID_USER.trim(),
         nombre: usuarioEncontrado.NOMBRE,
@@ -303,6 +310,48 @@ app.post('/api/reset-password', async (req, res) => {
     res.status(401).json({ error: 'Token inválido o alterado de forma maliciosa.' });
   }
 });
+
+// ==========================================
+// 🛡️ ENDPOINT 5: REFRESH TOKEN (Genera un nuevo acceso sin pedir contraseña) - HU-06
+// ==========================================
+app.post('/api/refresh', (req, res) => {
+  const { refreshToken } = req.body;
+
+  // Si no mandan el refresh token, los rebotamos
+  if (!refreshToken) {
+    return res.status(401).json({ error: 'Acceso denegado: No se proporcionó un Refresh Token.' });
+  }
+
+  try {
+    // Verificamos si la "llave maestra" sigue siendo válida y no ha sido alterada
+    const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET || 'clave_super_secreta_para_refresh_2026');
+    
+    // Si es válida, le fabricamos un nuevo Access Token fresquito de 15 minutos
+    const tokenPayload = {
+      id: decoded.id,
+      rol: decoded.rol,
+      nombre: decoded.nombre
+    };
+
+    const newAccessToken = jwt.sign(
+      tokenPayload, 
+      process.env.JWT_SECRET || 'clave_secreta_local_desarrollo', 
+      { expiresIn: '15m' }
+    );
+
+    // Se lo mandamos de vuelta al Frontend
+    res.json({ 
+      status: 'success',
+      accessToken: newAccessToken 
+    });
+
+  } catch (error) {
+    console.error('Intento de refresh token inválido:', error.message);
+    // Si el refresh token caducó o es falso, obligamos a iniciar sesión de nuevo
+    return res.status(403).json({ error: 'Refresh Token inválido o expirado. Por favor, inicie sesión nuevamente.' });
+  }
+});
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
