@@ -3,9 +3,17 @@ const cors = require('cors');
 const sql = require('mssql');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const app = express();
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+});
 app.use(cors());
 app.use(express.json());
 
@@ -195,6 +203,104 @@ app.post('/api/login', async (req, res) => {
     console.error('Error detallado en login:', error);
     await sql.close().catch(() => {});
     res.status(500).json({ error: 'Fallo interno en el proceso de autenticación del servidor.' });
+  }
+});
+
+// ==========================================
+// 🔄 ENDPOINT 3: SOLICITAR RECUPERACIÓN (Genera el Token y envía el correo)
+// ==========================================
+app.post('/api/forgot-password', async (req, res) => {
+  const { email } = req.body;
+
+  try {
+    // 1. Verificar si el usuario existe en tu Azure SQL Server
+    const pool = await sql.connect(sqlConfig); // CORREGIDO a sqlConfig
+    const result = await pool.request()
+      .input('email', sql.VarChar(100), email)
+      .query('SELECT ID_USER as id, NOMBRE as nombre FROM Usuario WHERE EMAIL = @email');
+
+    if (result.recordset.length === 0) {
+      // Por seguridad OWASP, no le decimos al hacker si el correo existe o no, mandamos 200 igual
+      return res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación pronto.' });
+    }
+
+    const usuario = result.recordset[0];
+
+    // 2. Generar un Token temporal firmado que expire en 15 minutos
+    const tokenToken = jwt.sign(
+      { id: usuario.id.trim(), email: email },
+      process.env.JWT_SECRET || 'clave_secreta_local_desarrollo',
+      { expiresIn: '15m' }
+    );
+
+    // 3. Crear el enlace seguro que apuntará a tu pantalla de React
+    const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${tokenToken}`;
+
+    // 4. Diseñar el correo electrónico en HTML (Elegante y con temática de fútbol)
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: '⚽ Restablecer tu contraseña — PichangaGo',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+          <h2 style="color: #00b48a; text-align: center;">PichangaGo</h2>
+          <p>¡Hola, <strong>${usuario.nombre}</strong>!</p>
+          <p>Recibimos una solicitud para restablecer la contraseña de tu cuenta en PichangaGo. Para volver a la cancha, haz clic en el siguiente botón:</p>
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${resetLink}" style="background-color: #1e2530; color: white; padding: 14px 24px; text-decoration: none; font-weight: bold; border-radius: 8px; display: inline-block;">
+              Restablecer Contraseña 🏃‍♂️💨
+            </a>
+          </div>
+          <p style="font-size: 12px; color: #64748b;">Este enlace es de un solo uso y expirará en 15 minutos por motivos de seguridad.</p>
+          <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
+          <p style="font-size: 11px; color: #94a3b8; text-align: center;">Si no solicitaste este cambio, puedes ignorar este correo de forma segura.</p>
+        </div>
+      `
+    };
+
+    // 5. Enviar el correo en vivo
+    await transporter.sendMail(mailOptions);
+    res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación pronto.' });
+
+  } catch (error) {
+    console.error('Error en forgot-password:', error);
+    res.status(500).json({ error: 'Error interno al procesar la solicitud' });
+  }
+});
+
+// ==========================================
+// 🔄 ENDPOINT 4: APLICAR LA NUEVA CONTRASEÑA (Valida el token y actualiza en Azure)
+// ==========================================
+app.post('/api/reset-password', async (req, res) => {
+  const { token, newPassword } = req.body;
+
+  if (!token || !newPassword) {
+    return res.status(400).json({ error: 'Faltan campos obligatorios' });
+  }
+
+  try {
+    // 1. Descifrar y validar que el Token JWT sea legítimo y no haya expirado
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'clave_secreta_local_desarrollo');
+
+    // 2. Encriptar la nueva contraseña con bcrypt (Estándar de Cifrado OWASP)
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+    // 3. Actualizar la contraseña en tu Azure SQL Server
+    const pool = await sql.connect(sqlConfig); // CORREGIDO a sqlConfig
+    await pool.request()
+      .input('id', sql.Char(10), decoded.id)
+      .input('password', sql.VarChar(100), hashedPassword)
+      .query('UPDATE Usuario SET PSW_HSH = @password WHERE ID_USER = @id');
+
+    res.json({ message: '¡Contraseña actualizada con éxito! Ya puedes iniciar sesión.' });
+
+  } catch (error) {
+    console.error('Error en reset-password:', error);
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'El enlace de recuperación ha expirado. Solicita uno nuevo.' });
+    }
+    res.status(401).json({ error: 'Token inválido o alterado de forma maliciosa.' });
   }
 });
 
