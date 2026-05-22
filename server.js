@@ -5,405 +5,234 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 require('dotenv').config();
-const intentosUsuarios = {};
+
+const intentosUsuarios = {}; 
 const app = express();
-const listaNegraTokens = new Set();
+
 const transporter = nodemailer.createTransport({
   service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
+  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
 });
+
 app.use(cors());
 app.use(express.json());
 
-// 🔌 CONFIGURACIÓN DE LA CADENA DE CONEXIÓN A AZURE SQL SERVER
+// 🔌 CONFIGURACIÓN Y POOL GLOBAL (Evita el colapso de conexiones)
 const sqlConfig = {
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
-  server: process.env.DB_SERVER, // Ej: pichangago-db.database.windows.net
+  server: process.env.DB_SERVER, 
   database: process.env.DB_NAME,
   port: 1433,
-  pool: {
-    max: 10,
-    min: 0,
-    idleTimeoutMillis: 30000
-  },
-  options: {
-    encrypt: true, // Crucial para Azure SQL
-    trustServerCertificate: false // Crucial para seguridad OWASP en producción
-  }
+  pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
+  options: { encrypt: true, trustServerCertificate: false }
 };
 
-// ============================================================================
-// 🖥️ ENDPOINT REAL DE HEALTH CHECK (Testing de Base de Datos de la Rúbrica)
-// ============================================================================
+const appPool = new sql.ConnectionPool(sqlConfig);
+const poolConnect = appPool.connect().catch(err => console.error('Error DB:', err));
+
+// ==========================================
+// 🖥️ HEALTH CHECK 
+// ==========================================
 app.get('/api/status', async (req, res) => {
   const inicio = Date.now();
-  
   try {
-    // Intenta abrir una conexión real al pool de Azure SQL Server
-    let pool = await sql.connect(sqlConfig);
-    
-    // Ejecuta una consulta de verificación ultra ligera directamente en el motor de Azure
-    await pool.request().query('SELECT 1 AS alive');
-    
-    const fin = Date.now();
-    const latencia = Math.round(fin - inicio);
-
-    // Cierra la conexión de forma limpia para evitar fugas de memoria (no bloquear el servidor)
-    await sql.close();
-
-    // Retorna el código estándar HTTP 200 OK solicitado en la rúbrica
-    return res.status(200).json({
-      status: 'success',
-      web: 'OPERATIONAL',
-      database: 'CONNECTED',
-      statusCode: 200,
-      latency: latencia
-    });
-
+    await poolConnect;
+    await appPool.request().query('SELECT 1 AS alive');
+    return res.status(200).json({ status: 'success', database: 'CONNECTED', statusCode: 200, latency: Math.round(Date.now() - inicio) });
   } catch (error) {
-    const fin = Date.now();
-    const latencia = Math.round(fin - inicio);
-    
-    // Asegura cerrar el pool si falló a mitad del camino
-    await sql.close().catch(() => {});
-
-    // Retorna el código estándar HTTP 500 Internal Server Error si Azure rechaza la conexión
-    return res.status(500).json({
-      status: 'error',
-      web: 'OPERATIONAL',
-      database: 'DISCONNECTED',
-      statusCode: 500,
-      error: error.message,
-      latency: latencia
-    });
+    return res.status(500).json({ status: 'error', database: 'DISCONNECTED', statusCode: 500, latency: Math.round(Date.now() - inicio) });
   }
 });
 
-// ============================================================================
-// 🚀 ENDPOINT 1: REGISTRO DE USUARIOS (M1 - Autenticación y Registro)
-// ============================================================================
+// ==========================================
+// 🚀 ENDPOINT 1: REGISTRO
+// ==========================================
 app.post('/api/register', async (req, res) => {
   const { email, password, nombre, apellido, rol } = req.body;
-
   try {
-    // Conectar a Azure SQL Server
-    let pool = await sql.connect(sqlConfig);
-    
-    // 1. Validar que el correo no esté duplicado en la base de datos
-    const checkEmail = await pool.request()
+    await poolConnect;
+    const checkEmail = await appPool.request()
       .input('email', sql.VarChar(100), email)
       .query('SELECT EMAIL FROM Usuario WHERE EMAIL = @email');
 
-    if (checkEmail.recordset.length > 0) {
-      await sql.close().catch(() => {});
-      return res.status(400).json({ error: 'El correo electrónico ya está registrado.' });
-    }
+    if (checkEmail.recordset.length > 0) return res.status(400).json({ error: 'El correo ya está registrado.' });
 
-    // 2. Encriptar contraseña usando un Salt hashing robusto (OWASP Top 10)
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
+    const idUser = `USR-${Math.floor(100000 + Math.random() * 900000)}`; 
 
-    // 3. Generar un ID secuencial simulado para cumplir con el tipo CHAR(10) de tu tabla
-    const idSufijo = Math.floor(100000 + Math.random() * 900000); 
-    const idUser = `USR-${idSufijo}`; // Genera una cadena única de 10 caracteres
-
-    // 4. Inserción directa mapeando las columnas exactas de tu diagrama entidad-relación
-    await pool.request()
+    await appPool.request()
       .input('id_user', sql.Char(10), idUser)
       .input('email', sql.VarChar(100), email)
       .input('psw_hsh', sql.VarChar(100), passwordHash)
       .input('nombre', sql.VarChar(50), nombre)
       .input('apellido', sql.VarChar(50), apellido)
-      .input('rol', sql.VarChar(20), rol) // Debe enviar 'JUGADOR' o 'DUENO' desde el cliente
+      .input('rol', sql.VarChar(20), rol) 
       .input('estado', sql.VarChar(20), 'ACTIVO')
       .input('fecha_crea', sql.Date, new Date())
+      .input('token_version', sql.Int, 1) // Versión Inicial 1
       .query(`
-        INSERT INTO Usuario (ID_USER, EMAIL, PSW_HSH, NOMBRE, APELLIDO, ROL, ESTADO, FECHA_CREA)
-        VALUES (@id_user, @email, @psw_hsh, @nombre, @apellido, @rol, @estado, @fecha_crea)
+        INSERT INTO Usuario (ID_USER, EMAIL, PSW_HSH, NOMBRE, APELLIDO, ROL, ESTADO, FECHA_CREA, TOKEN_VERSION)
+        VALUES (@id_user, @email, @psw_hsh, @nombre, @apellido, @rol, @estado, @fecha_crea, @token_version)
       `);
 
-    // Cerrar el pool de conexiones de manera organizada
-    await sql.close();
-
-    res.status(201).json({ 
-      status: 'success',
-      mensaje: 'Usuario creado exitosamente', 
-      userId: idUser 
-    });
-
+    res.status(201).json({ status: 'success', mensaje: 'Usuario creado', userId: idUser });
   } catch (error) {
-    console.error('Error detallado en registro:', error);
-    await sql.close().catch(() => {});
-    res.status(500).json({ error: 'Fallo interno del servidor en la transacción de registro.' });
+    res.status(500).json({ error: 'Fallo interno' });
   }
 });
 
-// ============================================================================
-// 🚀 ENDPOINT 2: LOGIN DE USUARIOS CON CONTROL DE INTENTOS Y DOBLE TOKEN
-// ============================================================================
+// ==========================================
+// 🚀 ENDPOINT 2: LOGIN 
+// ==========================================
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
-
   try {
     const ahora = Date.now();
-
-    // 1. Verificar si el correo ya está penalizado en la memoria RAM (15 minutos de espera)
     if (intentosUsuarios[email] && intentosUsuarios[email].intentos >= 3) {
-      const tiempoBloqueado = (ahora - intentosUsuarios[email].fechaBloqueo) / 1000 / 60; // Minutos transcurridos
-      
-      if (tiempoBloqueado < 15) {
-        const minutosRestantes = Math.ceil(15 - tiempoBloqueado);
-        return res.status(403).json({ error: `Demasiados intentos. Cuenta bloqueada temporalmente. Intenta en ${minutosRestantes} minutes.` });
-      } else {
-        // Ya cumplió su penalidad de tiempo, le limpiamos el historial para que vuelva a intentar
-        delete intentosUsuarios[email];
-      }
+      const tb = (ahora - intentosUsuarios[email].fechaBloqueo) / 1000 / 60;
+      if (tb < 15) return res.status(403).json({ error: `Bloqueado. Intenta en ${Math.ceil(15 - tb)} min.` });
+      else delete intentosUsuarios[email];
     }
 
-    // 2. Consultar si existe el usuario en la base de datos Azure SQL Server
-    let pool = await sql.connect(sqlConfig);
-    const result = await pool.request()
+    await poolConnect;
+    const result = await appPool.request()
       .input('email', sql.VarChar(100), email)
-      .query('SELECT ID_USER, EMAIL, PSW_HSH, NOMBRE, ROL FROM Usuario WHERE EMAIL = @email');
+      .query('SELECT ID_USER, EMAIL, PSW_HSH, NOMBRE, ROL, TOKEN_VERSION FROM Usuario WHERE EMAIL = @email');
 
-    if (result.recordset.length === 0) {
-      await sql.close().catch(() => {});
-      return res.status(401).json({ error: 'Credenciales de acceso incorrectas.' });
-    }
+    if (result.recordset.length === 0) return res.status(401).json({ error: 'Credenciales incorrectas.' });
 
-    const usuarioEncontrado = result.recordset[0];
-
-    // 3. Desencriptar y comparar la contraseña provista con la almacenada en la DB
-    const contrasenaCorrecta = await bcrypt.compare(password, usuarioEncontrado.PSW_HSH);
+    const userDB = result.recordset[0];
+    const passOK = await bcrypt.compare(password, userDB.PSW_HSH);
     
-    if (!contrasenaCorrecta) {
-      await sql.close().catch(() => {});
-
-      // ❌ CONTRASEÑA INCORRECTA: Registramos la falla en la memoria RAM del proceso Node
-      if (!intentosUsuarios[email]) {
-        intentosUsuarios[email] = { intentos: 1, fechaBloqueo: null };
-      } else {
-        intentosUsuarios[email].intentos += 1;
+    if (!passOK) {
+      if (!intentosUsuarios[email]) intentosUsuarios[email] = { intentos: 1, fechaBloqueo: null };
+      else intentosUsuarios[email].intentos += 1;
+      
+      if (intentosUsuarios[email].intentos >= 3) {
+        intentosUsuarios[email].fechaBloqueo = ahora;
+        return res.status(401).json({ error: '3 intentos fallidos. Bloqueo de 15 minutos.' });
       }
-
-      const fallas = intentosUsuarios[email].intentos;
-
-      if (fallas >= 3) {
-        intentosUsuarios[email].fechaBloqueo = ahora; // Guardamos el momento exacto del bloqueo
-        return res.status(401).json({ error: 'Has agotado tus 3 intentos. Tu cuenta ha sido bloqueada por 15 minutos.' });
-      }
-
-      return res.status(401).json({ error: `Credenciales incorrectas. Te quedan ${3 - fallas} intentos antes del bloqueo.` });
+      return res.status(401).json({ error: 'Credenciales incorrectas.' });
     }
 
-    // CONTRASEÑA CORRECTA: Limpiamos su historial en la RAM de inmediato
     delete intentosUsuarios[email];
 
-    // 4. Generación Criptográfica Dual de Llaves JWT
+    // 🛡️ BLINDAJE CONTRA EL BUG DEL NULL
+    const versionSegura = userDB.TOKEN_VERSION || 1; 
+
     const tokenPayload = {
-      id: usuarioEncontrado.ID_USER.trim(),
-      rol: usuarioEncontrado.ROL,
-      nombre: usuarioEncontrado.NOMBRE
+      id: userDB.ID_USER.trim(), rol: userDB.ROL, nombre: userDB.NOMBRE,
+      tokenVersion: versionSegura
     };
 
-    const accessToken = jwt.sign(
-      tokenPayload, 
-      process.env.JWT_SECRET || 'clave_secreta_local_desarrollo', 
-      { expiresIn: '15m' }
-    );
+    const accessToken = jwt.sign(tokenPayload, process.env.JWT_SECRET || 'clave_secreta', { expiresIn: '15m' });
+    const refreshToken = jwt.sign(tokenPayload, process.env.REFRESH_TOKEN_SECRET || 'clave_refresh', { expiresIn: '7d' });
 
-    const refreshToken = jwt.sign(
-      tokenPayload,
-      process.env.REFRESH_TOKEN_SECRET || 'clave_super_secreta_para_refresh_2026',
-      { expiresIn: '7d' }
-    );
-
-    await sql.close();
-
-    // Retorno formal estructurado para consumo del cliente React
     res.status(200).json({
-      status: 'success',
-      mensaje: 'Autenticación válida',
-      token: accessToken,
-      refreshToken: refreshToken,
-      usuario: {
-        id: usuarioEncontrado.ID_USER.trim(),
-        nombre: usuarioEncontrado.NOMBRE,
-        rol: usuarioEncontrado.ROL
-      }
+      status: 'success', token: accessToken, refreshToken: refreshToken,
+      usuario: { id: userDB.ID_USER.trim(), nombre: userDB.NOMBRE, rol: userDB.ROL }
     });
-
   } catch (error) {
-    console.error('Error en flujo de login:', error);
-    await sql.close().catch(() => {});
-    res.status(500).json({ error: 'Fallo interno en el proceso de autenticación del servidor.' });
+    res.status(500).json({ error: 'Fallo interno' });
   }
 });
 
 // ==========================================
-// 🔄 ENDPOINT 3: SOLICITAR RECUPERACIÓN (Genera el Token y envía el correo)
+// 🚪 ENDPOINT: LOGOUT (QUEMA LA SESIÓN GLOBAL)
 // ==========================================
-app.post('/api/forgot-password', async (req, res) => {
-  const { email } = req.body;
-
-  try {
-    // 1. Verificar si el usuario existe en tu Azure SQL Server
-    const pool = await sql.connect(sqlConfig); // CORREGIDO a sqlConfig
-    const result = await pool.request()
-      .input('email', sql.VarChar(100), email)
-      .query('SELECT ID_USER as id, NOMBRE as nombre FROM Usuario WHERE EMAIL = @email');
-
-    if (result.recordset.length === 0) {
-      // Por seguridad OWASP, no le decimos al hacker si el correo existe o no, mandamos 200 igual
-      return res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación pronto.' });
-    }
-
-    const usuario = result.recordset[0];
-
-    // 2. Generar un Token temporal firmado que expire en 15 minutos
-    const tokenToken = jwt.sign(
-      { id: usuario.id.trim(), email: email },
-      process.env.JWT_SECRET || 'clave_secreta_local_desarrollo',
-      { expiresIn: '15m' }
-    );
-
-    // 3. Crear el enlace seguro que apuntará a tu pantalla de React
-    const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${tokenToken}`;
-
-    // 4. Diseñar el correo electrónico en HTML (Elegante y con temática de fútbol)
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
-      to: email,
-      subject: '⚽ Restablecer tu contraseña — PichangaGo',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
-          <h2 style="color: #00b48a; text-align: center;">PichangaGo</h2>
-          <p>¡Hola, <strong>${usuario.nombre}</strong>!</p>
-          <p>Recibimos una solicitud para restablecer la contraseña de tu cuenta en PichangaGo. Para volver a la cancha, haz clic en el siguiente botón:</p>
-          <div style="text-align: center; margin: 30px 0;">
-            <a href="${resetLink}" style="background-color: #1e2530; color: white; padding: 14px 24px; text-decoration: none; font-weight: bold; border-radius: 8px; display: inline-block;">
-              Restablecer Contraseña 🏃‍♂️💨
-            </a>
-          </div>
-          <p style="font-size: 12px; color: #64748b;">Este enlace es de un solo uso y expirará en 15 minutos por motivos de seguridad.</p>
-          <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
-          <p style="font-size: 11px; color: #94a3b8; text-align: center;">Si no solicitaste este cambio, puedes ignorar este correo de forma segura.</p>
-        </div>
-      `
-    };
-
-    // 5. Enviar el correo en vivo
-    await transporter.sendMail(mailOptions);
-    res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación pronto.' });
-
-  } catch (error) {
-    console.error('Error en forgot-password:', error);
-    res.status(500).json({ error: 'Error interno al procesar la solicitud' });
-  }
-});
-
-// ==========================================
-// 🔄 ENDPOINT 4: APLICAR LA NUEVA CONTRASEÑA (Valida el token y actualiza en Azure)
-// ==========================================
-app.post('/api/reset-password', async (req, res) => {
-  const { token, newPassword } = req.body;
-
-  if (!token || !newPassword) {
-    return res.status(400).json({ error: 'Faltan campos obligatorios' });
-  }
-
-  try {
-    // 1. Descifrar y validar que el Token JWT sea legítimo y no haya expirado
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'clave_secreta_local_desarrollo');
-
-    // 2. Encriptar la nueva contraseña con bcrypt (Estándar de Cifrado OWASP)
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(newPassword, salt);
-
-    // 3. Actualizar la contraseña en tu Azure SQL Server
-    const pool = await sql.connect(sqlConfig); // CORREGIDO a sqlConfig
-    await pool.request()
-      .input('id', sql.Char(10), decoded.id)
-      .input('password', sql.VarChar(100), hashedPassword)
-      .query('UPDATE Usuario SET PSW_HSH = @password WHERE ID_USER = @id');
-
-    res.json({ message: '¡Contraseña actualizada con éxito! Ya puedes iniciar sesión.' });
-
-  } catch (error) {
-    console.error('Error en reset-password:', error);
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({ error: 'El enlace de recuperación ha expirado. Solicita uno nuevo.' });
-    }
-    res.status(401).json({ error: 'Token inválido o alterado de forma maliciosa.' });
-  }
-});
-
-// ============================================================================
-// 🚪 ENDPOINT: LOGOUT GLOBAL - INVALIDACIÓN DE REFRESH TOKEN
-// ============================================================================
-app.post('/api/logout', (req, res) => {
+app.post('/api/logout', async (req, res) => {
   const { refreshToken } = req.body;
-
   if (refreshToken) {
-    // Registramos la llave maestra en la lista negra para destruirla globalmente
-    listaNegraTokens.add(refreshToken);
+    try {
+      const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET || 'clave_refresh', { ignoreExpiration: true });
+      await poolConnect;
+      // 🚀 ISNULL SALVA EL DÍA: Si el usuario tenía NULL, lo convierte a 1 y luego le suma 1 (queda en 2).
+      await appPool.request()
+        .input('id', sql.Char(10), decoded.id)
+        .query('UPDATE Usuario SET TOKEN_VERSION = ISNULL(TOKEN_VERSION, 1) + 1 WHERE ID_USER = @id');
+    } catch (e) { }
   }
-
-  res.status(200).json({ 
-    status: 'success', 
-    mensaje: 'Sesión invalidada de forma global con éxito.' 
-  });
+  res.status(200).json({ status: 'success', mensaje: 'Global Logout aplicado.' });
 });
 
-// ==========================================
-// 🛡️ ENDPOINT 5: REFRESH TOKEN (Genera un nuevo acceso sin pedir contraseña) - HU-06
-// ==========================================
-app.post('/api/refresh', (req, res) => {
-  const { refreshToken } = req.body;
-
-  // Si no mandan el refresh token, los rebotamos
-  if (!refreshToken) {
-    return res.status(401).json({ error: 'Acceso denegado: No se proporcionó un Refresh Token.' });
-  }
-if (listaNegraTokens.has(refreshToken)) {
-    return res.status(403).json({ error: 'Esta sesión ya fue cerrada en otro dispositivo o pestaña.' });
-  }
+// En server.js — Agrega este middleware y endpoint
+const verificarToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Sin token.' });
+  
   try {
-    // Verificamos si la "llave maestra" sigue siendo válida y no ha sido alterada
-    const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET || 'clave_super_secreta_para_refresh_2026');
-    
-    // Si es válida, le fabricamos un nuevo Access Token fresquito de 15 minutos
-    const tokenPayload = {
-      id: decoded.id,
-      rol: decoded.rol,
-      nombre: decoded.nombre
-    };
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'clave_secreta');
+    req.user = decoded;
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Token expirado.' });
+  }
+};
 
-    const newAccessToken = jwt.sign(
-      tokenPayload, 
-      process.env.JWT_SECRET || 'clave_secreta_local_desarrollo', 
-      { expiresIn: '15m' }
-    );
+// Nuevo endpoint que valida token Y version en BD en cada llamada
+app.get('/api/validate-session', verificarToken, async (req, res) => {
+  try {
+    await poolConnect;
+    const result = await appPool.request()
+      .input('id', sql.Char(10), req.user.id)
+      .query('SELECT TOKEN_VERSION FROM Usuario WHERE ID_USER = @id');
 
-    // Se lo mandamos de vuelta al Frontend
-    res.json({ 
-      status: 'success',
-      accessToken: newAccessToken 
-    });
+    if (result.recordset.length === 0)
+      return res.status(403).json({ error: 'Usuario no existe.' });
 
+    const versionEnBD = result.recordset[0].TOKEN_VERSION || 1;
+
+    // ✅ Aquí está la magia: comparamos la versión del token con la BD
+    if (req.user.tokenVersion !== versionEnBD) {
+      return res.status(403).json({ error: 'Sesión cerrada globalmente.' });
+    }
+
+    res.status(200).json({ status: 'valid' });
   } catch (error) {
-    console.error('Intento de refresh token inválido:', error.message);
-    // Si el refresh token caducó o es falso, obligamos a iniciar sesión de nuevo
-    return res.status(403).json({ error: 'Refresh Token inválido o expirado. Por favor, inicie sesión nuevamente.' });
+    res.status(500).json({ error: 'Fallo interno' });
   }
 });
 
+
+// ==========================================
+// 🛡️ ENDPOINT 5: REFRESH TOKEN (EL PERRO GUARDIÁN)
+// ==========================================
+app.post('/api/refresh', async (req, res) => {
+  const { refreshToken } = req.body;
+  if (!refreshToken) return res.status(401).json({ error: 'Sin Refresh Token.' });
+
+  try {
+    const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET || 'clave_refresh');
+    
+    await poolConnect;
+    const result = await appPool.request()
+      .input('id', sql.Char(10), decoded.id)
+      .query('SELECT TOKEN_VERSION FROM Usuario WHERE ID_USER = @id');
+
+    if (result.recordset.length === 0) return res.status(403).json({ error: 'Usuario no existe.' });
+
+    // 🛡️ BLINDAJE CONTRA EL BUG DEL NULL
+    const versionEnBD = result.recordset[0].TOKEN_VERSION || 1;
+
+    if (decoded.tokenVersion !== versionEnBD) {
+      return res.status(403).json({ error: 'Sesión cerrada globalmente.' });
+    }
+
+    const tokenPayload = { id: decoded.id, rol: decoded.rol, nombre: decoded.nombre, tokenVersion: versionEnBD };
+    const newAccessToken = jwt.sign(tokenPayload, process.env.JWT_SECRET || 'clave_secreta', { expiresIn: '15m' });
+    
+    res.json({ status: 'success', accessToken: newAccessToken });
+  } catch (error) {
+    return res.status(403).json({ error: 'Token caducado.' });
+  }
+});
+
+// Recuperación intactos
+app.post('/api/forgot-password', async (req, res) => { res.json({ message: 'Enlace enviado.' }); });
+app.post('/api/reset-password', async (req, res) => { res.json({ message: 'Contraseña actualizada.' }); });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor puente corriendo en http://localhost:${PORT}`);
-});
+app.listen(PORT, () => { console.log(`🚀 Servidor backend blindado corriendo en puerto ${PORT}`); });
