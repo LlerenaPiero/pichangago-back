@@ -17,7 +17,6 @@ const transporter = nodemailer.createTransport({
 app.use(cors());
 app.use(express.json());
 
-// 🔌 CONFIGURACIÓN Y POOL GLOBAL (Evita el colapso de conexiones)
 const sqlConfig = {
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
@@ -30,6 +29,22 @@ const sqlConfig = {
 
 const appPool = new sql.ConnectionPool(sqlConfig);
 const poolConnect = appPool.connect().catch(err => console.error('Error DB:', err));
+
+// ==========================================
+// 🛡️ MIDDLEWARE: VERIFICAR TOKEN JWT
+// ==========================================
+const verificarToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Sin token.' });
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'clave_secreta');
+    req.user = decoded;
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Token expirado.' });
+  }
+};
 
 // ==========================================
 // 🖥️ HEALTH CHECK 
@@ -46,7 +61,32 @@ app.get('/api/status', async (req, res) => {
 });
 
 // ==========================================
-// 🚀 ENDPOINT 1: REGISTRO
+// 🔍 VALIDATE SESSION — EL QUE USA EL RADAR
+// ==========================================
+app.get('/api/validate-session', verificarToken, async (req, res) => {
+  try {
+    await poolConnect;
+    const result = await appPool.request()
+      .input('id', sql.Char(10), req.user.id)
+      .query('SELECT TOKEN_VERSION FROM Usuario WHERE ID_USER = @id');
+
+    if (result.recordset.length === 0)
+      return res.status(403).json({ error: 'Usuario no existe.' });
+
+    const versionEnBD = result.recordset[0].TOKEN_VERSION || 1;
+
+    if (req.user.tokenVersion !== versionEnBD) {
+      return res.status(403).json({ error: 'Sesión cerrada globalmente.' });
+    }
+
+    res.status(200).json({ status: 'valid' });
+  } catch (error) {
+    res.status(500).json({ error: 'Fallo interno' });
+  }
+});
+
+// ==========================================
+// 🚀 REGISTRO
 // ==========================================
 app.post('/api/register', async (req, res) => {
   const { email, password, nombre, apellido, rol } = req.body;
@@ -71,7 +111,7 @@ app.post('/api/register', async (req, res) => {
       .input('rol', sql.VarChar(20), rol) 
       .input('estado', sql.VarChar(20), 'ACTIVO')
       .input('fecha_crea', sql.Date, new Date())
-      .input('token_version', sql.Int, 1) // Versión Inicial 1
+      .input('token_version', sql.Int, 1)
       .query(`
         INSERT INTO Usuario (ID_USER, EMAIL, PSW_HSH, NOMBRE, APELLIDO, ROL, ESTADO, FECHA_CREA, TOKEN_VERSION)
         VALUES (@id_user, @email, @psw_hsh, @nombre, @apellido, @rol, @estado, @fecha_crea, @token_version)
@@ -84,7 +124,7 @@ app.post('/api/register', async (req, res) => {
 });
 
 // ==========================================
-// 🚀 ENDPOINT 2: LOGIN 
+// 🚀 LOGIN 
 // ==========================================
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
@@ -109,7 +149,6 @@ app.post('/api/login', async (req, res) => {
     if (!passOK) {
       if (!intentosUsuarios[email]) intentosUsuarios[email] = { intentos: 1, fechaBloqueo: null };
       else intentosUsuarios[email].intentos += 1;
-      
       if (intentosUsuarios[email].intentos >= 3) {
         intentosUsuarios[email].fechaBloqueo = ahora;
         return res.status(401).json({ error: '3 intentos fallidos. Bloqueo de 15 minutos.' });
@@ -119,9 +158,7 @@ app.post('/api/login', async (req, res) => {
 
     delete intentosUsuarios[email];
 
-    // 🛡️ BLINDAJE CONTRA EL BUG DEL NULL
     const versionSegura = userDB.TOKEN_VERSION || 1; 
-
     const tokenPayload = {
       id: userDB.ID_USER.trim(), rol: userDB.ROL, nombre: userDB.NOMBRE,
       tokenVersion: versionSegura
@@ -140,7 +177,7 @@ app.post('/api/login', async (req, res) => {
 });
 
 // ==========================================
-// 🚪 ENDPOINT: LOGOUT (QUEMA LA SESIÓN GLOBAL)
+// 🚪 LOGOUT GLOBAL
 // ==========================================
 app.post('/api/logout', async (req, res) => {
   const { refreshToken } = req.body;
@@ -148,7 +185,6 @@ app.post('/api/logout', async (req, res) => {
     try {
       const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET || 'clave_refresh', { ignoreExpiration: true });
       await poolConnect;
-      // 🚀 ISNULL SALVA EL DÍA: Si el usuario tenía NULL, lo convierte a 1 y luego le suma 1 (queda en 2).
       await appPool.request()
         .input('id', sql.Char(10), decoded.id)
         .query('UPDATE Usuario SET TOKEN_VERSION = ISNULL(TOKEN_VERSION, 1) + 1 WHERE ID_USER = @id');
@@ -157,48 +193,8 @@ app.post('/api/logout', async (req, res) => {
   res.status(200).json({ status: 'success', mensaje: 'Global Logout aplicado.' });
 });
 
-// En server.js — Agrega este middleware y endpoint
-const verificarToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Sin token.' });
-  
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'clave_secreta');
-    req.user = decoded;
-    next();
-  } catch {
-    return res.status(401).json({ error: 'Token expirado.' });
-  }
-};
-
-// Nuevo endpoint que valida token Y version en BD en cada llamada
-app.get('/api/validate-session', verificarToken, async (req, res) => {
-  try {
-    await poolConnect;
-    const result = await appPool.request()
-      .input('id', sql.Char(10), req.user.id)
-      .query('SELECT TOKEN_VERSION FROM Usuario WHERE ID_USER = @id');
-
-    if (result.recordset.length === 0)
-      return res.status(403).json({ error: 'Usuario no existe.' });
-
-    const versionEnBD = result.recordset[0].TOKEN_VERSION || 1;
-
-    // ✅ Aquí está la magia: comparamos la versión del token con la BD
-    if (req.user.tokenVersion !== versionEnBD) {
-      return res.status(403).json({ error: 'Sesión cerrada globalmente.' });
-    }
-
-    res.status(200).json({ status: 'valid' });
-  } catch (error) {
-    res.status(500).json({ error: 'Fallo interno' });
-  }
-});
-
-
 // ==========================================
-// 🛡️ ENDPOINT 5: REFRESH TOKEN (EL PERRO GUARDIÁN)
+// 🛡️ REFRESH TOKEN
 // ==========================================
 app.post('/api/refresh', async (req, res) => {
   const { refreshToken } = req.body;
@@ -206,7 +202,6 @@ app.post('/api/refresh', async (req, res) => {
 
   try {
     const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET || 'clave_refresh');
-    
     await poolConnect;
     const result = await appPool.request()
       .input('id', sql.Char(10), decoded.id)
@@ -214,25 +209,96 @@ app.post('/api/refresh', async (req, res) => {
 
     if (result.recordset.length === 0) return res.status(403).json({ error: 'Usuario no existe.' });
 
-    // 🛡️ BLINDAJE CONTRA EL BUG DEL NULL
     const versionEnBD = result.recordset[0].TOKEN_VERSION || 1;
-
     if (decoded.tokenVersion !== versionEnBD) {
       return res.status(403).json({ error: 'Sesión cerrada globalmente.' });
     }
 
     const tokenPayload = { id: decoded.id, rol: decoded.rol, nombre: decoded.nombre, tokenVersion: versionEnBD };
     const newAccessToken = jwt.sign(tokenPayload, process.env.JWT_SECRET || 'clave_secreta', { expiresIn: '15m' });
-    
     res.json({ status: 'success', accessToken: newAccessToken });
   } catch (error) {
-    return res.status(403).json({ error: 'Token caducado.' });
+    if (error.name === 'TokenExpiredError' || error.name === 'JsonWebTokenError') {
+      return res.status(403).json({ error: 'Token caducado o malicioso.' });
+    }
+    return res.status(500).json({ error: 'Saturacion temporal de Base de Datos' });
   }
 });
 
-// Recuperación intactos
-app.post('/api/forgot-password', async (req, res) => { res.json({ message: 'Enlace enviado.' }); });
-app.post('/api/reset-password', async (req, res) => { res.json({ message: 'Contraseña actualizada.' }); });
+// ==========================================
+// 🔄 FORGOT PASSWORD
+// ==========================================
+app.post('/api/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  try {
+    await poolConnect;
+    const result = await appPool.request()
+      .input('email', sql.VarChar(100), email)
+      .query('SELECT ID_USER as id, NOMBRE as nombre FROM Usuario WHERE EMAIL = @email');
+
+    if (result.recordset.length === 0) {
+      return res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación pronto.' });
+    }
+
+    const usuario = result.recordset[0];
+    const tokenToken = jwt.sign(
+      { id: usuario.id.trim(), email: email },
+      process.env.JWT_SECRET || 'clave_secreta',
+      { expiresIn: '15m' }
+    );
+
+    const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${tokenToken}`;
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: '⚽ Restablecer tu contraseña — PichangaGo',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+          <h2 style="color: #00b48a; text-align: center;">PichangaGo</h2>
+          <p>¡Hola, <strong>${usuario.nombre}</strong>!</p>
+          <p>Recibimos una solicitud para restablecer la contraseña. Haz clic en el botón:</p>
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${resetLink}" style="background-color: #1e2530; color: white; padding: 14px 24px; text-decoration: none; font-weight: bold; border-radius: 8px; display: inline-block;">
+              Restablecer Contraseña 🏃‍♂️💨
+            </a>
+          </div>
+          <p style="font-size: 12px; color: #64748b;">Este enlace expirará en 15 minutos.</p>
+        </div>
+      `
+    };
+
+    await transporter.sendMail(mailOptions);
+    res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación pronto.' });
+  } catch (error) {
+    console.error('🚨 ERROR FATAL EN FORGOT-PASSWORD:', error);
+    res.status(500).json({ error: 'Error interno al enviar el correo.' });
+  }
+});
+
+// ==========================================
+// 🔄 RESET PASSWORD
+// ==========================================
+app.post('/api/reset-password', async (req, res) => {
+  const { token, newPassword } = req.body;
+  if (!token || !newPassword) return res.status(400).json({ error: 'Faltan campos obligatorios' });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'clave_secreta');
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+    await poolConnect;
+    await appPool.request()
+      .input('id', sql.Char(10), decoded.id)
+      .input('password', sql.VarChar(100), hashedPassword)
+      .query('UPDATE Usuario SET PSW_HSH = @password WHERE ID_USER = @id');
+
+    res.json({ message: '¡Contraseña actualizada con éxito! Ya puedes iniciar sesión.' });
+  } catch (error) {
+    if (error.name === 'TokenExpiredError') return res.status(401).json({ error: 'El enlace ha expirado.' });
+    res.status(401).json({ error: 'Token inválido.' });
+  }
+});
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => { console.log(`🚀 Servidor backend blindado corriendo en puerto ${PORT}`); });
