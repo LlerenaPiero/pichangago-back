@@ -86,40 +86,84 @@ app.get('/api/validate-session', verificarToken, async (req, res) => {
 });
 
 // ==========================================
-// 🚀 REGISTRO
+// 🚀 REGISTRO (CON SOPORTE PARA INTEGRIDAD DE DUEÑO)
 // ==========================================
 app.post('/api/register', async (req, res) => {
   const { email, password, nombre, apellido, rol } = req.body;
+  
   try {
     await poolConnect;
+
+    // 1. Validar si el correo ya existe
     const checkEmail = await appPool.request()
       .input('email', sql.VarChar(100), email)
       .query('SELECT EMAIL FROM Usuario WHERE EMAIL = @email');
 
-    if (checkEmail.recordset.length > 0) return res.status(400).json({ error: 'El correo ya está registrado.' });
+    if (checkEmail.recordset.length > 0) {
+      return res.status(400).json({ error: 'El correo ya está registrado.' });
+    }
 
+    // 2. Encriptar contraseña y generar ID de Usuario
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
-    const idUser = `USR-${Math.floor(100000 + Math.random() * 900000)}`; 
+    const idUser = `USR-${Math.floor(100000 + Math.random() * 900000)}`;
 
-    await appPool.request()
-      .input('id_user', sql.Char(10), idUser)
-      .input('email', sql.VarChar(100), email)
-      .input('psw_hsh', sql.VarChar(100), passwordHash)
-      .input('nombre', sql.VarChar(50), nombre)
-      .input('apellido', sql.VarChar(50), apellido)
-      .input('rol', sql.VarChar(20), rol) 
-      .input('estado', sql.VarChar(20), 'ACTIVO')
-      .input('fecha_crea', sql.Date, new Date())
-      .input('token_version', sql.Int, 1)
-      .query(`
-        INSERT INTO Usuario (ID_USER, EMAIL, PSW_HSH, NOMBRE, APELLIDO, ROL, ESTADO, FECHA_CREA, TOKEN_VERSION)
-        VALUES (@id_user, @email, @psw_hsh, @nombre, @apellido, @rol, @estado, @fecha_crea, @token_version)
-      `);
+    // 3. Iniciar Transacción para asegurar consistencia entre tablas
+    const transaction = new sql.Transaction(appPool);
+    await transaction.begin();
 
-    res.status(201).json({ status: 'success', mensaje: 'Usuario creado', userId: idUser });
+    try {
+      // 4. Insertar en la tabla Usuario
+      await new sql.Request(transaction)
+        .input('id_user', sql.Char(10), idUser)
+        .input('email', sql.VarChar(100), email)
+        .input('psw_hsh', sql.VarChar(100), passwordHash)
+        .input('nombre', sql.VarChar(50), nombre)
+        .input('apellido', sql.VarChar(50), apellido)
+        .input('rol', sql.VarChar(20), rol) // Ej: 'DUEÑO' o 'JUGADOR'
+        .input('estado', sql.VarChar(20), 'ACTIVO')
+        .input('fecha_crea', sql.Date, new Date())
+        .input('token_version', sql.Int, 1)
+        .query(`
+          INSERT INTO Usuario (ID_USER, EMAIL, PSW_HSH, NOMBRE, APELLIDO, ROL, ESTADO, FECHA_CREA, TOKEN_VERSION)
+          VALUES (@id_user, @email, @psw_hsh, @nombre, @apellido, @rol, @estado, @fecha_crea, @token_version)
+        `);
+
+      // 5. Si el rol es DUEÑO, insertar obligatoriamente en la tabla Dueño
+      // Se limpia el string con UPPERCASE para evitar problemas de tipeo desde el Front
+      if (rol && rol.toUpperCase() === 'DUEÑO') {
+        const idDueno = `DUE-${Math.floor(100000 + Math.random() * 900000)}`;
+        
+        await new sql.Request(transaction)
+          .input('id_dueño', sql.Char(10), idDueno)
+          .input('estado', sql.VarChar(20), 'ACTIVO')
+          .input('fecha_afiliacion', sql.Date, new Date())
+          .input('id_user', sql.Char(10), idUser)
+          // Ruc, Razon_Social, CCI y Banco se inicializan vacíos/null para que los llene en su Perfil/Onboarding
+          .query(`
+            INSERT INTO Dueño (ID_Dueño, Estado, Fecha_Afiliacion, ID_User, Ruc, Razon_Social, CCI, Banco)
+            VALUES (@id_dueño, @estado, @fecha_afiliacion, @id_user, NULL, NULL, NULL, NULL)
+          `);
+      }
+
+      // Confirmar todos los cambios si todo salió bien
+      await transaction.commit();
+      
+      return res.status(201).json({ 
+        status: 'success', 
+        mensaje: 'Usuario registrado exitosamente.', 
+        userId: idUser 
+      });
+
+    } catch (errorTransaccion) {
+      // Si algo falló en los INSERTs, deshacer los cambios
+      await transaction.rollback();
+      throw errorTransaccion; // Lanza el error al catch principal
+    }
+
   } catch (error) {
-    res.status(500).json({ error: 'Fallo interno' });
+    console.error('🚨 ERROR EN REGISTRO:', error);
+    return res.status(500).json({ error: 'Fallo interno en el servidor.' });
   }
 });
 
@@ -299,6 +343,12 @@ app.post('/api/reset-password', async (req, res) => {
     res.status(401).json({ error: 'Token inválido.' });
   }
 });
+
+// ==========================================
+// 🏢 MODULO: DUEÑO DE CANCHAS
+// ==========================================
+const duenoRoutes = require('./src/routes/dueno.routes')(verificarToken);
+app.use('/api/dueno', duenoRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => { console.log(`🚀 Servidor backend blindado corriendo en puerto ${PORT}`); });
