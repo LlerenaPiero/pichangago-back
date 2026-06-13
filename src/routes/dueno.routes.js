@@ -4,12 +4,10 @@ const duenoController = require('../controllers/dueno.controller');
 
 module.exports = (verificarToken) => {
     
-    // Momento 1: Configuración
+    // Rutas de la primera característica (Feature 1)
     router.post('/canchas', verificarToken, duenoController.registrarCancha);
-    
-    // Momento 2: Operación Diaria
-    router.get('/agenda/hoy', verificarToken, duenoController.verSlotsHoy);
-    router.put('/slots/:idSlot/estado', verificarToken, duenoController.bloquearSlot);
+    router.put('/canchas/:idCancha', verificarToken, duenoController.editarCancha);
+    router.patch('/canchas/:idCancha/estado', verificarToken, duenoController.cambiarEstadoCancha);
 
     return router;
 };
