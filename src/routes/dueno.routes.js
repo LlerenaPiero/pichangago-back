@@ -16,5 +16,10 @@ module.exports = (verificarToken, appPool) => {
     // Feature 3: Horarios y Tarifas
     router.post('/canchas/:idCancha/horarios', verificarToken, (req, res) => duenoController.configurarHorariosTarifas(req, res, appPool));
 
+    // Feature 4: Operación Diaria y Slots
+    router.get('/agenda/diaria', verificarToken, (req, res) => duenoController.obtenerAgendaDiaria(req, res, appPool));
+    router.put('/slots/:idSlot/estado', verificarToken, (req, res) => duenoController.actualizarEstadoSlot(req, res, appPool));
+    router.post('/slots/:idSlot/oferta', verificarToken, (req, res) => duenoController.crearOfertaSlot(req, res, appPool));
+
     return router;
 };

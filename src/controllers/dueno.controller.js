@@ -247,10 +247,171 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
     }
 };
 
+// ==========================================
+// 📅 FEATURE 4: OPERACIÓN DIARIA (MOMENTO 2)
+// ==========================================
+
+// D-07 y D-08: Ver la agenda/slots de hoy con detalles de reserva adjuntos
+const obtenerAgendaDiaria = async (req, res, appPool) => {
+    const idUser = req.user.id;
+    const { fecha } = req.query; // Se espera formato YYYY-MM-DD, si no viene, toma el día actual
+    const fechaFiltro = fecha || new Date().toISOString().split('T')[0];
+
+    try {
+        const idDueno = await obtenerIdDueno(idUser, appPool);
+
+        // Query que cruza Slots, Horarios, Canchas y hace un LEFT JOIN con Reservas y Usuario
+        const result = await new sql.Request(appPool)
+            .input('id_dueño', sql.Char(10), idDueno)
+            .input('fecha', sql.Date, fechaFiltro)
+            .query(`
+                SELECT 
+                    S.ID_Slots, S.Fecha, S.Estado AS EstadoSlot,
+                    C.ID_Cancha, C.Nombre AS CanchaNombre, C.Tipo AS CanchaTipo,
+                    H.Fecha_Inicio, H.Fecha_Fin, H.Tipo_Precio,
+                    R.ID_Reserva, R.Monto_Total, R.Estado AS EstadoReserva,
+                    U.Nombre AS JugadorNombre, U.Telefono AS JugadorTelefono
+                FROM Slots S
+                INNER JOIN Canchas C ON S.ID_Cancha = C.ID_Cancha
+                INNER JOIN Horarios H ON S.ID_Horario = H.ID_Horario
+                LEFT JOIN Reservas R ON S.ID_Slots = R.ID_Slots
+                LEFT JOIN Usuario U ON R.ID_User = U.ID_User
+                WHERE S.ID_Dueño = @id_dueño AND S.Fecha = @fecha
+                ORDER BY C.Nombre ASC, H.Fecha_Inicio ASC
+            `);
+
+        res.status(200).json({ status: 'success', data: result.recordset });
+    } catch (error) {
+        console.error('🚨 Error en obtenerAgendaDiaria:', error);
+        res.status(500).json({ error: 'Error interno al recopilar la agenda diaria.' });
+    }
+};
+
+// D-10 y D-11: Actualizar estado de un Slot (Bloqueo manual o No-Show)
+const actualizarEstadoSlot = async (req, res, appPool) => {
+    const { idSlot } = req.params;
+    const { nuevoEstado } = req.body; // 'BLOQUEADO', 'DISPONIBLE', 'NO_ASISTIO'
+
+    const estadosValidos = ['DISPONIBLE', 'BLOQUEADO', 'RESERVADO', 'NO_ASISTIO'];
+    if (!estadosValidos.includes(nuevoEstado)) {
+        return res.status(400).json({ error: 'Estado de slot no permitido.' });
+    }
+
+    try {
+        const idDueno = await obtenerIdDueno(req.user.id, appPool);
+
+        // Seguridad: Verificar propiedad del slot antes de actuar
+        const requestVerificar = new sql.Request(appPool);
+        const check = await requestVerificar
+            .input('id_slot', sql.Char(10), idSlot)
+            .input('id_dueño', sql.Char(10), idDueno)
+            .query('SELECT ID_Slots FROM Slots WHERE ID_Slots = @id_slot AND ID_Dueño = @id_dueño');
+
+        if (check.recordset.length === 0) {
+            return res.status(403).json({ error: 'No tienes autorización sobre este bloque horario.' });
+        }
+
+        // Ejecutar la actualización del estado del slot
+        await new sql.Request(appPool)
+            .input('id_slot', sql.Char(10), idSlot)
+            .input('estado', sql.VarChar(20), nuevoEstado)
+            .query('UPDATE Slots SET Estado = @estado WHERE ID_Slots = @id_slot');
+
+        // Si es un "No asistió" (D-11), también actualizamos el estado de la reserva vinculada a ese slot
+        if (nuevoEstado === 'NO_ASISTIO') {
+            await new sql.Request(appPool)
+                .input('id_slot', sql.Char(10), idSlot)
+                .query("UPDATE Reservas SET Estado = 'NO_SHOW' WHERE ID_Slots = @id_slot");
+        }
+
+        res.status(200).json({ status: 'success', mensaje: `Slot actualizado a ${nuevoEstado} con éxito.` });
+    } catch (error) {
+        console.error('🚨 Error en actualizarEstadoSlot:', error);
+        res.status(500).json({ error: 'Error interno al cambiar el estado del bloque operativo.' });
+    }
+};
+
+// D-12: Crear oferta de último minuto para un Slot vacío
+const crearOfertaSlot = async (req, res, appPool) => {
+    const { idSlot } = req.params;
+    const { porcentajeDescuento, precioOfertado, fechaExpira } = req.body;
+
+    if (!porcentajeDescuento || !precioOfertado) {
+        return res.status(400).json({ error: 'Faltan parámetros para estructurar la oferta flash.' });
+    }
+
+    try {
+        const idDueno = await obtenerIdDueno(req.user.id, appPool);
+
+        // 1. Obtener la información del slot para heredar el ID_Cancha exigido por el DER
+        const slotData = await new sql.Request(appPool)
+            .input('id_slot', sql.Char(10), idSlot)
+            .input('id_dueño', sql.Char(10), idDueno)
+            .query('SELECT ID_Cancha, Estado FROM Slots WHERE ID_Slots = @id_slot AND ID_Dueño = @id_dueño');
+
+        if (slotData.recordset.length === 0) {
+            return res.status(404).json({ error: 'Slot no encontrado o ajeno al dueño.' });
+        }
+
+        if (slotData.recordset[0].Estado !== 'DISPONIBLE') {
+            return res.status(400).json({ error: 'No se puede lanzar una oferta sobre un slot reservado o bloqueado.' });
+        }
+
+        const idCancha = slotData.recordset[0].ID_Cancha;
+        const idOferta = `OFR-${Math.floor(100000 + Math.random() * 900000)}`;
+
+        // 2. Iniciar transacción doble: Insertar Oferta + Cambiar estado de Slot a 'OFERTA' (o ámbar)
+        const transaction = new sql.Transaction(appPool);
+        await transaction.begin();
+
+        try {
+            // Inserción exacta mapeando las columnas del DER (Imagen_1.png)
+            await new sql.Request(transaction)
+                .input('id_oferta', sql.Char(10), idOferta)
+                .input('id_cancha', sql.Char(10), idCancha)
+                .input('porcen_desc', sql.Int, parseInt(porcentajeDescuento))
+                .input('prec_ofert', sql.Decimal(10, 2), parseFloat(precioOfertado))
+                .input('estado', sql.VarChar(20), 'ACTIVO')
+                .input('fecha_expira', sql.Date, fechaExpira ? new Date(fechaExpira) : new Date())
+                .input('fecha_creac', sql.Date, new Date())
+                .query(`
+                    INSERT INTO Oferta (ID_Oferta, ID_Cancha, Porcen_Desc, Prec_Ofert, Estado, Fecha_Expira, Fecha_Creac)
+                    VALUES (@id_oferta, @id_cancha, @porcen_desc, @prec_ofert, @estado, @fecha_expira, @fecha_creac)
+                `);
+
+            // Cambiamos el estado del slot para que el catálogo del Front lo pinte en ámbar/oferta
+            await new sql.Request(transaction)
+                .input('id_slot', sql.Char(10), idSlot)
+                .query("UPDATE Slots SET Estado = 'OFERTA' WHERE ID_Slots = @id_slot");
+
+            await transaction.commit();
+            res.status(201).json({ status: 'success', mensaje: '🔥 ¡Oferta relámpago publicada en el catálogo!', idOferta });
+
+        } catch (errTrans) {
+            await transaction.rollback();
+            throw errTrans;
+        }
+
+    } catch (error) {
+        console.error('🚨 Error en crearOfertaSlot:', error);
+        res.status(500).json({ error: 'Error interno al procesar la oferta relámpago.' });
+    }
+};
+
+
+// ==========================================
+// 🚀 EXPORTACIÓN UNIFICADA DE CONTROLADORES
+// ==========================================
 module.exports = {
+    // Onboarding y Mantenimiento
     registrarCancha,
     editarCancha,
     cambiarEstadoCancha,
     actualizarPerfilFinanciero,
-    configurarHorariosTarifas
+    configurarHorariosTarifas,
+
+    // Operación Diaria
+    obtenerAgendaDiaria,
+    actualizarEstadoSlot,
+    crearOfertaSlot
 };
