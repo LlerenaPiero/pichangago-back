@@ -129,23 +129,27 @@ app.post('/api/register', async (req, res) => {
           VALUES (@id_user, @email, @psw_hsh, @nombre, @apellido, @rol, @estado, @fecha_crea, @token_version)
         `);
 
-      // 5. Si el rol es DUEÑO, insertar obligatoriamente en la tabla Dueño
-      // Se limpia el string con UPPERCASE para evitar problemas de tipeo desde el Front
-      if (rol && rol.toUpperCase() === 'DUEÑO') {
-        const idDueno = `DUE-${Math.floor(100000 + Math.random() * 900000)}`;
-        
-        await new sql.Request(transaction)
-          .input('id_dueño', sql.Char(10), idDueno)
-          .input('estado', sql.VarChar(20), 'ACTIVO')
-          .input('fecha_afiliacion', sql.Date, new Date())
-          .input('id_user', sql.Char(10), idUser)
-          // Ruc, Razon_Social, CCI y Banco se inicializan vacíos/null para que los llene en su Perfil/Onboarding
-          .query(`
-            INSERT INTO Dueño (ID_Dueño, Estado, Fecha_Afiliacion, ID_User, Ruc, Razon_Social, CCI, Banco)
-            VALUES (@id_dueño, @estado, @fecha_afiliacion, @id_user, NULL, NULL, NULL, NULL)
-          `);
-      }
-
+      // 5. Normalizar el rol para aceptar 'DUEÑO' y 'DUENO' (Evita el choque con la eñe del Front)
+      const rolLimpio = rol ? rol.toUpperCase().trim() : '';
+      
+      if (rolLimpio === 'DUEÑO' || rolLimpio === 'DUENO') {
+  const idDueno = `DUE-${Math.floor(100000 + Math.random() * 900000)}`;
+  
+    await new sql.Request(transaction)
+      .input('id_dueño', sql.Char(10), idDueno)
+      .input('estado', sql.VarChar(20), 'ACTIVO')
+      .input('fecha_afiliacion', sql.Date, new Date())
+      .input('id_user', sql.Char(10), idUser)
+    // 💡 SOLUCIÓN: Enviamos strings vacíos para cumplir con la restricción NOT NULL de SQL Server
+      .input('ruc', sql.VarChar(11), '')
+      .input('razon_social', sql.VarChar(100), '')
+      .input('cci', sql.VarChar(50), '')
+      .input('banco', sql.VarChar(50), 'BCP') // Inicializamos con un banco por defecto
+      .query(`
+      INSERT INTO Dueño (ID_Dueño, Estado, Fecha_Afiliacion, ID_User, Ruc, Razon_Social, CCI, Banco)
+      VALUES (@id_dueño, @estado, @fecha_afiliacion, @id_user, @ruc, @razon_social, @cci, @banco)
+    `);
+}
       // Confirmar todos los cambios si todo salió bien
       await transaction.commit();
       
@@ -347,7 +351,7 @@ app.post('/api/reset-password', async (req, res) => {
 // ==========================================
 // 🏢 MODULO: DUEÑO DE CANCHAS
 // ==========================================
-const duenoRoutes = require('./src/routes/dueno.routes')(verificarToken);
+const duenoRoutes = require('./src/routes/dueno.routes')(verificarToken, appPool);
 app.use('/api/dueno', duenoRoutes);
 
 const PORT = process.env.PORT || 5000;
