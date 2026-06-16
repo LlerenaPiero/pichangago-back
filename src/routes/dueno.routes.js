@@ -9,6 +9,7 @@ module.exports = (verificarToken, appPool) => {
     router.post('/canchas', verificarToken, (req, res) => duenoController.registrarCancha(req, res, appPool));
     router.put('/canchas/:idCancha', verificarToken, (req, res) => duenoController.editarCancha(req, res, appPool));
     router.patch('/canchas/:idCancha/estado', verificarToken, (req, res) => duenoController.cambiarEstadoCancha(req, res, appPool));
+    router.get('/canchas/:idCancha/reviews', verificarToken, (req, res) => duenoController.obtenerReviewsCancha(req, res, appPool));
 
     // Feature 2: Configuración Financiera
     router.put('/perfil-financiero', verificarToken, (req, res) => duenoController.actualizarPerfilFinanciero(req, res, appPool));

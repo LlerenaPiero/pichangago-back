@@ -108,6 +108,54 @@ const editarCancha = async (req, res, appPool) => {
     }
 };
 
+// Obtener reviews de una cancha (para el dueño)
+const obtenerReviewsCancha = async (req, res, appPool) => {
+    const { idCancha } = req.params;
+    const idUser = req.user.id;
+
+    try {
+        const idDueno = await obtenerIdDueno(idUser, appPool);
+
+        const verify = await new sql.Request(appPool)
+            .input('id_cancha', sql.Char(10), idCancha)
+            .input('id_dueño', sql.Char(10), idDueno)
+            .query('SELECT ID_Cancha FROM Canchas WHERE ID_Cancha = @id_cancha AND ID_Dueño = @id_dueño');
+
+        if (verify.recordset.length === 0) {
+            return res.status(403).json({ status: 'error', error: 'No tienes permisos sobre esta cancha.' });
+        }
+
+        const result = await new sql.Request(appPool)
+            .input('id_cancha', sql.Char(10), idCancha)
+            .query(`
+                SELECT R.ID_Review, R.Calificacion, R.Comentarios, R.Fecha_Crea,
+                       U.Nombre AS JugadorNombre, U.APELLIDO AS JugadorApellido
+                FROM Reviews R
+                INNER JOIN Usuario U ON R.ID_User = U.ID_USER
+                WHERE R.ID_Cancha = @id_cancha
+                ORDER BY R.Fecha_Crea DESC
+            `);
+
+        const totalReviews = result.recordset.length;
+        const promedio = totalReviews > 0
+            ? result.recordset.reduce((s, r) => s + r.Calificacion, 0) / totalReviews
+            : 0;
+
+        res.status(200).json({
+            status: 'success',
+            data: {
+                total_reviews: totalReviews,
+                promedio: Math.round(promedio * 10) / 10,
+                reviews: result.recordset
+            }
+        });
+    } catch (error) {
+        if (error.message === 'DUEÑO_NOT_FOUND') return res.status(404).json({ status: 'error', error: 'Perfil de dueño no encontrado.' });
+        console.error('🚨 Error en obtenerReviewsCancha:', error);
+        res.status(500).json({ status: 'error', error: 'Error interno al obtener reviews.' });
+    }
+};
+
 // D-06: Suspender / Reactivar la Cancha (Borrado Lógico)
 const cambiarEstadoCancha = async (req, res, appPool) => {
     const { idCancha } = req.params;
@@ -407,6 +455,7 @@ module.exports = {
     registrarCancha,
     editarCancha,
     cambiarEstadoCancha,
+    obtenerReviewsCancha,
     actualizarPerfilFinanciero,
     configurarHorariosTarifas,
 
