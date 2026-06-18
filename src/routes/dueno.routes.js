@@ -6,7 +6,7 @@ const { verificarRol } = require('../middleware/roleMiddleware');
 const upload = require('../middleware/upload');
 const {
     canchaRules, localRules, perfilFinancieroRules, horarioRules,
-    estadoCanchaRules, estadoSlotRules, ofertaRules
+    estadoCanchaRules, estadoSlotRules, ofertaRules, updateProfileRules
 } = require('../middleware/validators');
 
 // Recibimos tanto el middleware como el pool de conexiones activo de la BD
@@ -28,7 +28,9 @@ module.exports = (verificarToken, appPool) => {
     router.get('/canchas/:idCancha/reviews', ...auth, (req, res) => duenoController.obtenerReviewsCancha(req, res, appPool));
     router.delete('/canchas/fotos/:idFoto', ...auth, (req, res) => duenoController.eliminarFoto(req, res, appPool));
 
-    // Feature 2: Configuración Financiera
+    // Feature 2: Perfil de Usuario y Configuración Financiera
+    router.get('/perfil', ...auth, (req, res) => duenoController.obtenerPerfil(req, res, appPool));
+    router.put('/perfil', ...auth, updateProfileRules, (req, res) => duenoController.actualizarPerfil(req, res, appPool));
     router.get('/perfil-financiero', ...auth, (req, res) => duenoController.obtenerPerfilFinanciero(req, res, appPool));
     router.put('/perfil-financiero', ...auth, perfilFinancieroRules, (req, res) => duenoController.actualizarPerfilFinanciero(req, res, appPool));
 
@@ -40,6 +42,7 @@ module.exports = (verificarToken, appPool) => {
     // Feature 4: Operación Diaria y Slots
     router.get('/agenda/diaria', ...auth, (req, res) => duenoController.obtenerAgendaDiaria(req, res, appPool));
     router.get('/agenda/semanal', ...auth, (req, res) => duenoController.obtenerCalendarioSemanal(req, res, appPool));
+    router.get('/reservas/historial', ...auth, (req, res) => negocioController.obtenerHistorialReservas(req, res, appPool));
     router.get('/reservas/:idReserva', ...auth, (req, res) => duenoController.obtenerDetalleReserva(req, res, appPool));
     router.put('/slots/:idSlot/estado', ...auth, estadoSlotRules, (req, res) => duenoController.actualizarEstadoSlot(req, res, appPool));
     router.post('/slots/:idSlot/oferta', ...auth, ofertaRules, (req, res) => duenoController.crearOfertaSlot(req, res, appPool));
@@ -50,7 +53,6 @@ module.exports = (verificarToken, appPool) => {
     router.get('/reportes/saldo-pendiente', ...auth, (req, res) => negocioController.obtenerSaldoPendiente(req, res, appPool));
     router.get('/reportes/liquidaciones', ...auth, (req, res) => negocioController.obtenerHistorialLiquidaciones(req, res, appPool));
     router.get('/reportes/ocupacion', ...auth, (req, res) => negocioController.obtenerEstadisticasOcupacion(req, res, appPool));
-    router.get('/reservas/historial', ...auth, (req, res) => negocioController.obtenerHistorialReservas(req, res, appPool));
 
     return router;
 };

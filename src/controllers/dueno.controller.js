@@ -17,6 +17,13 @@ const obtenerIdDueno = async (idUser, appPool) => {
     return result.recordset[0].ID_Dueño;
 };
 
+const CCI_BANK_MAP = { '0002': 'BCP', '0003': 'Interbank', '0011': 'BBVA' };
+
+const getBankFromCCI = (cci) => {
+    if (!cci || cci.length < 4) return null;
+    return CCI_BANK_MAP[cci.substring(0, 4)] || null;
+};
+
 // ==========================================
 // 🏗️ FEATURE 1: MANTENIMIENTO DE CANCHAS
 // ==========================================
@@ -483,6 +490,72 @@ const cambiarEstadoCancha = async (req, res, appPool) => {
 // ==========================================
 
 // D-02: Obtener datos financieros del dueño
+// GET /api/dueno/perfil — Datos completos del usuario dueño
+const obtenerPerfil = async (req, res, appPool) => {
+    const idUser = req.user.id;
+    try {
+        const result = await new sql.Request(appPool)
+            .input('id_user', sql.Char(10), idUser)
+            .query(`
+                SELECT
+                    U.ID_USER, U.NOMBRE AS Nombre, U.APELLIDO AS Apellido, U.EMAIL AS Correo, U.TELEFONO AS Telefono, U.ROL AS Rol, U.ESTADO AS Estado,
+                    D.ID_DUEÑO AS ID_Dueño, D.RUC AS Ruc, D.RAZON_SOCIAL AS Razon_Social, D.CCI AS Cci, D.BANCO AS Banco, D.ESTADO AS EstadoDueño, D.FECHA_AFILIACION AS Fecha_Afiliacion
+                FROM Usuario U
+                LEFT JOIN Dueño D ON U.ID_USER = D.ID_USER
+                WHERE U.ID_USER = @id_user
+            `);
+        if (result.recordset.length === 0) {
+            return res.status(404).json({ status: 'error', error: 'Usuario no encontrado.' });
+        }
+        res.status(200).json({ status: 'success', data: result.recordset[0] });
+    } catch (error) {
+        console.error('🚨 Error en obtenerPerfil:', error);
+        res.status(500).json({ status: 'error', error: 'Error interno al obtener perfil.' });
+    }
+};
+
+// PUT /api/dueno/perfil — Actualizar nombre, apellido y/o teléfono
+const actualizarPerfil = async (req, res, appPool) => {
+    const idUser = req.user.id;
+    const { nombre, apellido, telefono } = req.body;
+    try {
+        const updates = [];
+        const request = new sql.Request(appPool);
+        request.input('id_user', sql.Char(10), idUser);
+
+        if (nombre !== undefined) {
+            updates.push('NOMBRE = @nombre');
+            request.input('nombre', sql.VarChar(50), nombre.trim());
+        }
+        if (apellido !== undefined) {
+            updates.push('APELLIDO = @apellido');
+            request.input('apellido', sql.VarChar(50), apellido.trim());
+        }
+        if (telefono !== undefined) {
+            updates.push('TELEFONO = @telefono');
+            request.input('telefono', sql.VarChar(9), telefono.trim());
+        }
+
+        if (updates.length === 0) {
+            return res.status(400).json({ status: 'error', error: 'No se enviaron campos para actualizar.' });
+        }
+
+        const result = await request.query(`
+            UPDATE Usuario SET ${updates.join(', ')}
+            WHERE ID_USER = @id_user
+        `);
+
+        if (result.rowsAffected[0] === 0) {
+            return res.status(404).json({ status: 'error', error: 'Usuario no encontrado.' });
+        }
+
+        res.status(200).json({ status: 'success', mensaje: 'Perfil actualizado correctamente.' });
+    } catch (error) {
+        console.error('🚨 Error en actualizarPerfil:', error);
+        res.status(500).json({ status: 'error', error: 'Error interno al actualizar perfil.' });
+    }
+};
+
 const obtenerPerfilFinanciero = async (req, res, appPool) => {
     const idUser = req.user.id;
     try {
@@ -504,8 +577,8 @@ const actualizarPerfilFinanciero = async (req, res, appPool) => {
     const { ruc, razonSocial, cci, banco } = req.body;
     const idUser = req.user.id; 
 
-    if (!ruc || !razonSocial || !cci || !banco) {
-        return res.status(400).json({ status: 'error', error: 'Todos los campos financieros son obligatorios.' });
+    if (!ruc || !razonSocial || !cci) {
+        return res.status(400).json({ status: 'error', error: 'RUC, razón social y CCI son obligatorios.' });
     }
 
     if (ruc.length !== 11) {
@@ -516,6 +589,19 @@ const actualizarPerfilFinanciero = async (req, res, appPool) => {
         return res.status(400).json({ status: 'error', error: 'El CCI debe tener exactamente 20 dígitos.' });
     }
 
+    let bancoFinal = banco;
+    if (!bancoFinal) {
+        bancoFinal = getBankFromCCI(cci);
+        if (!bancoFinal) {
+            return res.status(400).json({ status: 'error', error: 'No se pudo identificar el banco a partir del CCI. Los primeros 4 dígitos deben ser 0002 (BCP), 0003 (Interbank) o 0011 (BBVA).' });
+        }
+    } else {
+        const detected = getBankFromCCI(cci);
+        if (detected && bancoFinal !== detected) {
+            return res.status(400).json({ status: 'error', error: `El banco "${bancoFinal}" no coincide con el CCI. Según el código, el banco debe ser "${detected}".` });
+        }
+    }
+
     try {
         const request = new sql.Request(appPool);
         const result = await request
@@ -523,7 +609,7 @@ const actualizarPerfilFinanciero = async (req, res, appPool) => {
             .input('ruc', sql.VarChar(11), ruc)
             .input('razon_social', sql.VarChar(100), razonSocial)
             .input('cci', sql.VarChar(50), cci)
-            .input('banco', sql.VarChar(50), banco)
+            .input('banco', sql.VarChar(50), bancoFinal)
             .query(`
                 UPDATE Dueño 
                 SET Ruc = @ruc, Razon_Social = @razon_social, CCI = @cci, Banco = @banco
@@ -1048,6 +1134,8 @@ module.exports = {
     cambiarEstadoCancha,
     obtenerReviewsCancha,
     eliminarFoto,
+    obtenerPerfil,
+    actualizarPerfil,
     obtenerPerfilFinanciero,
     actualizarPerfilFinanciero,
     configurarHorariosTarifas,

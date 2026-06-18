@@ -166,7 +166,7 @@ const obtenerOfertasHoy = async (req, res, appPool) => {
         C.Precio_Base, C.Precio_Prime, C.Precio_Baja,
         L.Distrito,
         H.DIA_SEMANA, H.TIPO_PRECIO,
-        S.Fecha,
+        S.ID_Slots, S.Fecha,
         CONVERT(VARCHAR(5), S.Hora_Inicio, 108) AS Hora_Inicio,
         CONVERT(VARCHAR(5), S.Hora_Fin, 108) AS Hora_Fin,
         O.Porcen_Desc, O.Prec_Ofert,
@@ -218,6 +218,7 @@ const obtenerOfertasHoy = async (req, res, appPool) => {
       const slotLima = new Date(fechaStr + 'T' + r.Hora_Inicio + ':00-05:00');
       const diffMin = Math.round((slotLima.getTime() - ahoraLima.getTime()) / 60000);
       return {
+        ID_Slots: r.ID_Slots,
         ID_Cancha: r.ID_Cancha,
         Nombre: r.Nombre,
         Distrito: r.Distrito,
