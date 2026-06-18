@@ -4,10 +4,28 @@ const sql = require('mssql');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
+const http = require('http');
+const { Server } = require('socket.io');
 require('dotenv').config();
+
+const {
+    authLimiter, registerLimiter,
+    forgotPasswordLimiter, refreshLimiter, generalLimiter
+} = require('./src/middleware/security');
+const {
+    registerRules, loginRules, forgotPasswordRules, resetPasswordRules
+} = require('./src/middleware/validators');
+const errorHandler = require('./src/middleware/errorHandler');
 
 const intentosUsuarios = {}; 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
+
+app.use(generalLimiter);
+
+const helmet = require('helmet');
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -15,7 +33,7 @@ const transporter = nodemailer.createTransport({
 });
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 const sqlConfig = {
   user: process.env.DB_USER,
@@ -24,7 +42,10 @@ const sqlConfig = {
   database: process.env.DB_NAME,
   port: 1433,
   pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
-  options: { encrypt: true, trustServerCertificate: false }
+  options: {
+    encrypt: process.env.DB_ENCRYPT === 'true',
+    trustServerCertificate: process.env.DB_TRUST_CERT === 'true'
+  }
 };
 
 const appPool = new sql.ConnectionPool(sqlConfig);
@@ -36,13 +57,13 @@ const poolConnect = appPool.connect().catch(err => console.error('Error DB:', er
 const verificarToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Sin token.' });
+  if (!token) return res.status(401).json({ status: 'error', error: 'Sin token.' });
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'clave_secreta');
     req.user = decoded;
     next();
   } catch {
-    return res.status(401).json({ error: 'Token expirado.' });
+    return res.status(401).json({ status: 'error', error: 'Token expirado.' });
   }
 };
 
@@ -71,68 +92,119 @@ app.get('/api/validate-session', verificarToken, async (req, res) => {
       .query('SELECT TOKEN_VERSION FROM Usuario WHERE ID_USER = @id');
 
     if (result.recordset.length === 0)
-      return res.status(403).json({ error: 'Usuario no existe.' });
+      return res.status(403).json({ status: 'error', error: 'Usuario no existe.' });
 
     const versionEnBD = result.recordset[0].TOKEN_VERSION || 1;
 
     if (req.user.tokenVersion !== versionEnBD) {
-      return res.status(403).json({ error: 'Sesión cerrada globalmente.' });
+      return res.status(403).json({ status: 'error', error: 'Sesión cerrada globalmente.' });
     }
 
     res.status(200).json({ status: 'valid' });
   } catch (error) {
-    res.status(500).json({ error: 'Fallo interno' });
+    res.status(500).json({ status: 'error', error: 'Fallo interno' });
   }
 });
 
 // ==========================================
-// 🚀 REGISTRO
+// 🚀 REGISTRO (CON SOPORTE PARA INTEGRIDAD DE DUEÑO)
 // ==========================================
-app.post('/api/register', async (req, res) => {
-  const { email, password, nombre, apellido, rol } = req.body;
+app.post('/api/register', registerLimiter, registerRules, async (req, res) => {
+  const { email, password, nombre, apellido, rol, telefono } = req.body;
+
   try {
     await poolConnect;
+
+    // 1. Validar si el correo ya existe
     const checkEmail = await appPool.request()
       .input('email', sql.VarChar(100), email)
       .query('SELECT EMAIL FROM Usuario WHERE EMAIL = @email');
 
-    if (checkEmail.recordset.length > 0) return res.status(400).json({ error: 'El correo ya está registrado.' });
+    if (checkEmail.recordset.length > 0) {
+      return res.status(400).json({ status: 'error', error: 'El correo ya está registrado.' });
+    }
 
+    // 2. Encriptar contraseña y generar ID de Usuario
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
-    const idUser = `USR-${Math.floor(100000 + Math.random() * 900000)}`; 
+    const idUser = `USR-${Math.floor(100000 + Math.random() * 900000)}`;
 
-    await appPool.request()
-      .input('id_user', sql.Char(10), idUser)
-      .input('email', sql.VarChar(100), email)
-      .input('psw_hsh', sql.VarChar(100), passwordHash)
-      .input('nombre', sql.VarChar(50), nombre)
-      .input('apellido', sql.VarChar(50), apellido)
-      .input('rol', sql.VarChar(20), rol) 
+    // 3. Iniciar Transacción para asegurar consistencia entre tablas
+    const transaction = new sql.Transaction(appPool);
+    await transaction.begin();
+
+    try {
+      // 4. Insertar en la tabla Usuario
+      await new sql.Request(transaction)
+        .input('id_user', sql.Char(10), idUser)
+        .input('email', sql.VarChar(100), email)
+        .input('psw_hsh', sql.VarChar(100), passwordHash)
+        .input('nombre', sql.VarChar(50), nombre)
+        .input('apellido', sql.VarChar(50), apellido)
+        .input('rol', sql.VarChar(20), rol)
+        .input('telefono', sql.VarChar(12), telefono || null)
+        .input('estado', sql.VarChar(20), 'ACTIVO')
+        .input('fecha_crea', sql.Date, new Date())
+        .input('token_version', sql.Int, 1)
+        .query(`
+          INSERT INTO Usuario (ID_USER, EMAIL, PSW_HSH, NOMBRE, APELLIDO, ROL, ESTADO, TELEFONO, FECHA_CREA, TOKEN_VERSION)
+          VALUES (@id_user, @email, @psw_hsh, @nombre, @apellido, @rol, @estado, @telefono, @fecha_crea, @token_version)
+        `);
+
+      // 5. Normalizar el rol para aceptar 'DUEÑO' y 'DUENO' (Evita el choque con la eñe del Front)
+      const rolLimpio = rol ? rol.toUpperCase().trim() : '';
+      
+      if (rolLimpio === 'DUEÑO' || rolLimpio === 'DUENO') {
+  const idDueno = `DUE-${Math.floor(100000 + Math.random() * 900000)}`;
+  
+    await new sql.Request(transaction)
+      .input('id_dueño', sql.Char(10), idDueno)
       .input('estado', sql.VarChar(20), 'ACTIVO')
-      .input('fecha_crea', sql.Date, new Date())
-      .input('token_version', sql.Int, 1)
+      .input('fecha_afiliacion', sql.Date, new Date())
+      .input('id_user', sql.Char(10), idUser)
+    // 💡 SOLUCIÓN: Enviamos strings vacíos para cumplir con la restricción NOT NULL de SQL Server
+      .input('ruc', sql.VarChar(11), '')
+      .input('razon_social', sql.VarChar(100), '')
+      .input('cci', sql.VarChar(50), '')
+      .input('banco', sql.VarChar(50), 'BCP') // Inicializamos con un banco por defecto
       .query(`
-        INSERT INTO Usuario (ID_USER, EMAIL, PSW_HSH, NOMBRE, APELLIDO, ROL, ESTADO, FECHA_CREA, TOKEN_VERSION)
-        VALUES (@id_user, @email, @psw_hsh, @nombre, @apellido, @rol, @estado, @fecha_crea, @token_version)
-      `);
+      INSERT INTO Dueño (ID_Dueño, Estado, Fecha_Afiliacion, ID_User, Ruc, Razon_Social, CCI, Banco)
+      VALUES (@id_dueño, @estado, @fecha_afiliacion, @id_user, @ruc, @razon_social, @cci, @banco)
+    `);
+}
+      // Confirmar todos los cambios si todo salió bien
+      await transaction.commit();
+      
+      const esDueno = rolLimpio === 'DUEÑO' || rolLimpio === 'DUENO';
+      return res.status(201).json({ 
+        status: 'success', 
+        mensaje: 'Usuario registrado exitosamente.', 
+        userId: idUser,
+        requiresLocal: esDueno
+      });
 
-    res.status(201).json({ status: 'success', mensaje: 'Usuario creado', userId: idUser });
+    } catch (errorTransaccion) {
+      // Si algo falló en los INSERTs, deshacer los cambios
+      await transaction.rollback();
+      throw errorTransaccion; // Lanza el error al catch principal
+    }
+
   } catch (error) {
-    res.status(500).json({ error: 'Fallo interno' });
+    console.error('🚨 ERROR EN REGISTRO:', error);
+    return res.status(500).json({ status: 'error', error: 'Fallo interno en el servidor.' });
   }
 });
 
 // ==========================================
 // 🚀 LOGIN 
 // ==========================================
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', authLimiter, loginRules, async (req, res) => {
   const { email, password } = req.body;
   try {
     const ahora = Date.now();
     if (intentosUsuarios[email] && intentosUsuarios[email].intentos >= 3) {
       const tb = (ahora - intentosUsuarios[email].fechaBloqueo) / 1000 / 60;
-      if (tb < 15) return res.status(403).json({ error: `Bloqueado. Intenta en ${Math.ceil(15 - tb)} min.` });
+      if (tb < 15) return res.status(403).json({ status: 'error', error: `Bloqueado. Intenta en ${Math.ceil(15 - tb)} min.` });
       else delete intentosUsuarios[email];
     }
 
@@ -141,7 +213,7 @@ app.post('/api/login', async (req, res) => {
       .input('email', sql.VarChar(100), email)
       .query('SELECT ID_USER, EMAIL, PSW_HSH, NOMBRE, ROL, TOKEN_VERSION FROM Usuario WHERE EMAIL = @email');
 
-    if (result.recordset.length === 0) return res.status(401).json({ error: 'Credenciales incorrectas.' });
+    if (result.recordset.length === 0) return res.status(401).json({ status: 'error', error: 'Credenciales incorrectas.' });
 
     const userDB = result.recordset[0];
     const passOK = await bcrypt.compare(password, userDB.PSW_HSH);
@@ -151,9 +223,9 @@ app.post('/api/login', async (req, res) => {
       else intentosUsuarios[email].intentos += 1;
       if (intentosUsuarios[email].intentos >= 3) {
         intentosUsuarios[email].fechaBloqueo = ahora;
-        return res.status(401).json({ error: '3 intentos fallidos. Bloqueo de 15 minutos.' });
+        return res.status(401).json({ status: 'error', error: '3 intentos fallidos. Bloqueo de 15 minutos.' });
       }
-      return res.status(401).json({ error: 'Credenciales incorrectas.' });
+      return res.status(401).json({ status: 'error', error: 'Credenciales incorrectas.' });
     }
 
     delete intentosUsuarios[email];
@@ -172,7 +244,7 @@ app.post('/api/login', async (req, res) => {
       usuario: { id: userDB.ID_USER.trim(), nombre: userDB.NOMBRE, rol: userDB.ROL }
     });
   } catch (error) {
-    res.status(500).json({ error: 'Fallo interno' });
+    res.status(500).json({ status: 'error', error: 'Fallo interno' });
   }
 });
 
@@ -196,9 +268,9 @@ app.post('/api/logout', async (req, res) => {
 // ==========================================
 // 🛡️ REFRESH TOKEN
 // ==========================================
-app.post('/api/refresh', async (req, res) => {
+app.post('/api/refresh', refreshLimiter, async (req, res) => {
   const { refreshToken } = req.body;
-  if (!refreshToken) return res.status(401).json({ error: 'Sin Refresh Token.' });
+  if (!refreshToken) return res.status(401).json({ status: 'error', error: 'Sin Refresh Token.' });
 
   try {
     const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET || 'clave_refresh');
@@ -207,11 +279,11 @@ app.post('/api/refresh', async (req, res) => {
       .input('id', sql.Char(10), decoded.id)
       .query('SELECT TOKEN_VERSION FROM Usuario WHERE ID_USER = @id');
 
-    if (result.recordset.length === 0) return res.status(403).json({ error: 'Usuario no existe.' });
+    if (result.recordset.length === 0) return res.status(403).json({ status: 'error', error: 'Usuario no existe.' });
 
     const versionEnBD = result.recordset[0].TOKEN_VERSION || 1;
     if (decoded.tokenVersion !== versionEnBD) {
-      return res.status(403).json({ error: 'Sesión cerrada globalmente.' });
+      return res.status(403).json({ status: 'error', error: 'Sesión cerrada globalmente.' });
     }
 
     const tokenPayload = { id: decoded.id, rol: decoded.rol, nombre: decoded.nombre, tokenVersion: versionEnBD };
@@ -219,16 +291,16 @@ app.post('/api/refresh', async (req, res) => {
     res.json({ status: 'success', accessToken: newAccessToken });
   } catch (error) {
     if (error.name === 'TokenExpiredError' || error.name === 'JsonWebTokenError') {
-      return res.status(403).json({ error: 'Token caducado o malicioso.' });
+      return res.status(403).json({ status: 'error', error: 'Token caducado o malicioso.' });
     }
-    return res.status(500).json({ error: 'Saturacion temporal de Base de Datos' });
+    return res.status(500).json({ status: 'error', error: 'Saturacion temporal de Base de Datos' });
   }
 });
 
 // ==========================================
 // 🔄 FORGOT PASSWORD
 // ==========================================
-app.post('/api/forgot-password', async (req, res) => {
+app.post('/api/forgot-password', forgotPasswordLimiter, forgotPasswordRules, async (req, res) => {
   const { email } = req.body;
   try {
     await poolConnect;
@@ -271,16 +343,16 @@ app.post('/api/forgot-password', async (req, res) => {
     res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación pronto.' });
   } catch (error) {
     console.error('🚨 ERROR FATAL EN FORGOT-PASSWORD:', error);
-    res.status(500).json({ error: 'Error interno al enviar el correo.' });
+    res.status(500).json({ status: 'error', error: 'Error interno al enviar el correo.' });
   }
 });
 
 // ==========================================
 // 🔄 RESET PASSWORD
 // ==========================================
-app.post('/api/reset-password', async (req, res) => {
+app.post('/api/reset-password', forgotPasswordLimiter, resetPasswordRules, async (req, res) => {
   const { token, newPassword } = req.body;
-  if (!token || !newPassword) return res.status(400).json({ error: 'Faltan campos obligatorios' });
+  if (!token || !newPassword) return res.status(400).json({ status: 'error', error: 'Faltan campos obligatorios' });
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'clave_secreta');
@@ -295,10 +367,66 @@ app.post('/api/reset-password', async (req, res) => {
 
     res.json({ message: '¡Contraseña actualizada con éxito! Ya puedes iniciar sesión.' });
   } catch (error) {
-    if (error.name === 'TokenExpiredError') return res.status(401).json({ error: 'El enlace ha expirado.' });
-    res.status(401).json({ error: 'Token inválido.' });
+    if (error.name === 'TokenExpiredError') return res.status(401).json({ status: 'error', error: 'El enlace ha expirado.' });
+    res.status(401).json({ status: 'error', error: 'Token inválido.' });
   }
 });
 
+// ==========================================
+// 🏢 MODULO: DUEÑO DE CANCHAS
+// ==========================================
+const duenoRoutes = require('./src/routes/dueno.routes')(verificarToken, appPool);
+app.use('/api/dueno', duenoRoutes);
+
+// ==========================================
+// 🌐 PÚBLICO: CATÁLOGO DE CANCHAS
+// ==========================================
+const canchasRoutes = require('./src/routes/canchas.routes')(appPool, poolConnect);
+app.use('/api/canchas', canchasRoutes);
+
+// ==========================================
+// 🖼️ PROXY: IMÁGENES DESDE AZURE BLOB STORAGE
+// ==========================================
+const { streamBlob } = require('./src/config/azure-storage');
+app.get('/api/uploads', async (req, res) => {
+  const blobName = req.query.blob;
+  if (!blobName) return res.status(400).json({ status: 'error', error: 'Parámetro blob requerido' });
+  await streamBlob(blobName, res);
+});
+
+// ==========================================
+// 🔌 SOCKET.IO — NOTIFICACIONES EN TIEMPO REAL (D-13)
+// ==========================================
+app.set('io', io);
+
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth?.token;
+  if (!token) return next(new Error('Sin token.'));
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'clave_secreta');
+    await poolConnect;
+    const result = await appPool.request()
+      .input('id', sql.Char(10), decoded.id)
+      .query('SELECT TOKEN_VERSION FROM Usuario WHERE ID_USER = @id AND ESTADO = \'ACTIVO\'');
+    if (result.recordset.length === 0) return next(new Error('Usuario inactivo'));
+    const versionEnBD = result.recordset[0].TOKEN_VERSION || 1;
+    if (decoded.tokenVersion !== versionEnBD) return next(new Error('Sesión cerrada globalmente.'));
+    socket.user = decoded;
+    next();
+  } catch {
+    next(new Error('Token inválido.'));
+  }
+});
+
+io.on('connection', (socket) => {
+  console.log(`🔌 Socket conectado: ${socket.user.nombre} (${socket.user.id})`);
+  socket.join(`dueño:${socket.user.id}`);
+  socket.on('disconnect', () => {
+    console.log(`🔌 Socket desconectado: ${socket.user.nombre}`);
+  });
+});
+
+app.use(errorHandler);
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => { console.log(`🚀 Servidor backend blindado corriendo en puerto ${PORT}`); });
+server.listen(PORT, () => { console.log(`🚀 Servidor backend blindado corriendo en puerto ${PORT}`); });
