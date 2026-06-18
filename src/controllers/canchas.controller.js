@@ -1,8 +1,11 @@
 const sql = require('mssql');
+const { toProxyUrl } = require('../config/azure-storage');
 
 const PUBLIC_FIELDS = `
-  C.ID_Cancha, C.Nombre, C.Descripcion, C.Direccion, C.Distrito,
-  C.Precio_Base, C.Precio_Prime, C.Precio_Baja, C.Estado, C.Fecha_Crea
+  C.ID_Cancha, C.Nombre, C.Descripcion,
+  C.Precio_Base, C.Precio_Prime, C.Precio_Baja, C.Estado, C.Fecha_Crea,
+  L.ID_Local, L.Nombre AS LocalNombre, L.Direccion AS Direccion, L.Distrito AS Distrito,
+  D.ID_Dueño, U.Nombre AS DueñoNombre, U.APELLIDO AS DueñoApellido, U.TELEFONO AS DueñoTelefono
 `;
 
 const withFotos = (query) => `
@@ -26,7 +29,10 @@ const withFotos = (query) => `
 `;
 
 const parseData = (rows) =>
-  rows.map(r => ({ ...r, Fotos: JSON.parse(r.Fotos) }));
+  rows.map(r => ({
+    ...r,
+    Fotos: JSON.parse(r.Fotos).map(f => ({ ...f, URL_Foto: toProxyUrl(f.URL_Foto) }))
+  }));
 
 // GET /api/canchas
 const listarCanchas = async (req, res, appPool) => {
@@ -36,12 +42,15 @@ const listarCanchas = async (req, res, appPool) => {
     let query = `
       SELECT ${withFotos(PUBLIC_FIELDS)}
       FROM Canchas C
+      INNER JOIN Local L ON C.ID_Local = L.ID_Local
+      INNER JOIN Dueño D ON C.ID_DUEÑO = D.ID_DUEÑO
+      INNER JOIN Usuario U ON D.ID_USER = U.ID_USER
       WHERE C.Estado = 'DISPONIBLE'
     `;
     const request = new sql.Request(appPool);
 
     if (distrito) {
-      query += ' AND C.Distrito LIKE @distrito';
+      query += ' AND L.Distrito LIKE @distrito';
       request.input('distrito', sql.VarChar(50), `%${distrito}%`);
     }
     if (nombre) {
@@ -50,11 +59,11 @@ const listarCanchas = async (req, res, appPool) => {
     }
     if (precioMin) {
       query += ' AND C.Precio_Base >= @precioMin';
-      request.input('precioMin', sql.Decimal(10, 2), parseFloat(precioMin));
+      request.input('precioMin', sql.Decimal(8, 2), parseFloat(precioMin));
     }
     if (precioMax) {
       query += ' AND C.Precio_Base <= @precioMax';
-      request.input('precioMax', sql.Decimal(10, 2), parseFloat(precioMax));
+      request.input('precioMax', sql.Decimal(8, 2), parseFloat(precioMax));
     }
 
     query += ' ORDER BY C.Fecha_Crea DESC';
@@ -76,6 +85,9 @@ const obtenerCancha = async (req, res, appPool) => {
       .query(`
         SELECT ${withFotos(PUBLIC_FIELDS)}
         FROM Canchas C
+        INNER JOIN Local L ON C.ID_Local = L.ID_Local
+        INNER JOIN Dueño D ON C.ID_DUEÑO = D.ID_DUEÑO
+        INNER JOIN Usuario U ON D.ID_USER = U.ID_USER
         WHERE C.ID_Cancha = @id AND C.Estado = 'DISPONIBLE'
       `);
 

@@ -22,12 +22,17 @@ const registerRules = [
     .isLength({ min: 6, max: 100 }).withMessage('La contraseña debe tener entre 6 y 100 caracteres.'),
   body('nombre')
     .trim().notEmpty().withMessage('El nombre es obligatorio.')
-    .isLength({ max: 50 }).withMessage('El nombre no puede exceder 50 caracteres.'),
+    .isLength({ max: 50 }).withMessage('El nombre no puede exceder 50 caracteres.')
+    .matches(/^[a-zA-ZáéíóúñÑ\s]+$/).withMessage('El nombre solo puede contener letras y espacios.'),
   body('apellido')
     .trim().notEmpty().withMessage('El apellido es obligatorio.')
-    .isLength({ max: 50 }).withMessage('El apellido no puede exceder 50 caracteres.'),
+    .isLength({ max: 50 }).withMessage('El apellido no puede exceder 50 caracteres.')
+    .matches(/^[a-zA-ZáéíóúñÑ\s]+$/).withMessage('El apellido solo puede contener letras y espacios.'),
   body('rol')
     .trim().toUpperCase().isIn(['DUENO', 'DUEÑO', 'JUGADOR']).withMessage('Rol debe ser DUENO o JUGADOR.'),
+  body('telefono')
+    .optional({ values: 'falsy' }).trim()
+    .matches(/^\d{9}$/).withMessage('El teléfono debe tener exactamente 9 dígitos.'),
   handleValidationErrors
 ];
 
@@ -56,15 +61,12 @@ const resetPasswordRules = [
 ];
 
 const canchaRules = [
+  body('idLocal')
+    .trim().notEmpty().withMessage('El ID del local es obligatorio.')
+    .isLength({ max: 10 }).withMessage('ID de local inválido.'),
   body('nombre')
     .trim().notEmpty().withMessage('El nombre es obligatorio.')
     .isLength({ max: 50 }).withMessage('El nombre no puede exceder 50 caracteres.'),
-  body('direccion')
-    .trim().notEmpty().withMessage('La dirección es obligatoria.')
-    .isLength({ max: 150 }).withMessage('La dirección no puede exceder 150 caracteres.'),
-  body('distrito')
-    .trim().notEmpty().withMessage('El distrito es obligatorio.')
-    .isLength({ max: 50 }).withMessage('El distrito no puede exceder 50 caracteres.'),
   body('descripcion')
     .optional().trim().isLength({ max: 150 }).withMessage('La descripción no puede exceder 150 caracteres.'),
   body('precioBase')
@@ -73,6 +75,21 @@ const canchaRules = [
     .optional().isFloat({ min: 0, max: 999999.99 }).withMessage('Precio prime inválido.'),
   body('precioBaja')
     .optional().isFloat({ min: 0, max: 999999.99 }).withMessage('Precio baja inválido.'),
+  handleValidationErrors
+];
+
+const localRules = [
+  body('nombre')
+    .trim().notEmpty().withMessage('El nombre del local es obligatorio.')
+    .isLength({ max: 100 }).withMessage('El nombre no puede exceder 100 caracteres.'),
+  body('direccion')
+    .trim().notEmpty().withMessage('La dirección es obligatoria.')
+    .isLength({ max: 150 }).withMessage('La dirección no puede exceder 150 caracteres.'),
+  body('distrito')
+    .trim().notEmpty().withMessage('El distrito es obligatorio.')
+    .isLength({ max: 50 }).withMessage('El distrito no puede exceder 50 caracteres.'),
+  body('referencia')
+    .optional().trim().isLength({ max: 200 }).withMessage('La referencia no puede exceder 200 caracteres.'),
   handleValidationErrors
 ];
 
@@ -106,7 +123,7 @@ const horarioRules = [
 
 const estadoCanchaRules = [
   body('estado')
-    .trim().toUpperCase().isIn(['DISPONIBLE', 'SUSPENDIDO']).withMessage('Estado debe ser DISPONIBLE o SUSPENDIDO.'),
+    .trim().toUpperCase().isIn(['DISPONIBLE', 'SUSPENDIDO', 'INACTIVO']).withMessage('Estado debe ser DISPONIBLE, SUSPENDIDO o INACTIVO.'),
   handleValidationErrors
 ];
 
@@ -133,6 +150,7 @@ module.exports = {
   forgotPasswordRules,
   resetPasswordRules,
   canchaRules,
+  localRules,
   perfilFinancieroRules,
   horarioRules,
   estadoCanchaRules,

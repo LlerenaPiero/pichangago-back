@@ -160,7 +160,7 @@ const obtenerSaldoPendiente = async (req, res, appPool) => {
             new sql.Request(appPool)
                 .input('id_dueño', sql.Char(10), idDueno)
                 .query(`
-                    SELECT TOP 1 ID_Sub, Plan, Precio_Mens, Cantidad_Canch
+                    SELECT TOP 1 ID_Sub, [Plan], Precio_Mens, Cantidad_Canch
                     FROM Suscripcion
                     WHERE ID_Dueño = @id_dueño AND Estado = 'ACTIVO'
                 `)
@@ -214,7 +214,7 @@ const obtenerHistorialLiquidaciones = async (req, res, appPool) => {
                     L.ID_Liquid, L.Fecha_Inicio, L.Fecha_Fin,
                     L.Monto_Bruto, L.Comision_PGO, L.Monto_Neto,
                     L.NRO_Operac, L.Fecha_Transf, L.Estado,
-                    S.Plan, S.Precio_Mens
+                    S.[Plan], S.Precio_Mens
                 FROM Liquidacion L
                 INNER JOIN Suscripcion S ON L.ID_Dueño = S.ID_Dueño
                 WHERE L.ID_Dueño = @id_dueño
@@ -246,14 +246,14 @@ const obtenerEstadisticasOcupacion = async (req, res, appPool) => {
                 .input('year', sql.Int, parseInt(year))
                 .query(`
                     SELECT
-                        DATEPART(WEEKDAY, Fecha) AS dia_semana,
+                        (DATEPART(WEEKDAY, Fecha) + @@DATEFIRST - 1) % 7 AS dia_semana,
                         COUNT(*) AS total_slots,
                         SUM(CASE WHEN Estado IN ('RESERVADO', 'NO_ASISTIO') THEN 1 ELSE 0 END) AS ocupados
                     FROM Slots
                     WHERE ID_Dueño = @id_dueño
                       AND MONTH(Fecha) = @month
                       AND YEAR(Fecha) = @year
-                    GROUP BY DATEPART(WEEKDAY, Fecha)
+                    GROUP BY (DATEPART(WEEKDAY, Fecha) + @@DATEFIRST - 1) % 7
                     ORDER BY dia_semana
                 `),
             new sql.Request(appPool)
@@ -296,7 +296,7 @@ const obtenerEstadisticasOcupacion = async (req, res, appPool) => {
                 `)
         ]);
 
-        const nombreDias = ['', 'Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+        const nombreDias = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 
         const formatear = (arr, nombreField) => arr.map(r => ({
             ...r,
@@ -342,12 +342,13 @@ const obtenerHistorialReservas = async (req, res, appPool) => {
                 S.Fecha AS FechaSlot,
                 CONVERT(VARCHAR(5), S.Hora_Inicio, 108) AS Hora_Inicio,
                 CONVERT(VARCHAR(5), S.Hora_Fin, 108) AS Hora_Fin,
-                C.Nombre AS CanchaNombre, C.Direccion, C.Distrito,
+                C.Nombre AS CanchaNombre, L.Direccion, L.Distrito,
                 P.ID_Pago, P.Monto AS MontoPagado, P.Estado AS EstadoPago
             FROM Reservas R
             INNER JOIN Usuario U ON R.ID_User = U.ID_USER
             INNER JOIN Slots S ON R.ID_Slots = S.ID_Slots
             INNER JOIN Canchas C ON R.ID_Cancha = C.ID_Cancha
+            INNER JOIN Local L ON C.ID_Local = L.ID_Local
             LEFT JOIN Pagos P ON R.ID_Reserva = P.ID_Reserva
             WHERE R.ID_Dueño = @id_dueño
         `;
