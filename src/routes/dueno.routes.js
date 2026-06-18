@@ -1,6 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const duenoController = require('../controllers/dueno.controller');
+const negocioController = require('../controllers/negocio.controller');
+const { verificarRol } = require('../middleware/roleMiddleware');
+const upload = require('../middleware/upload');
+const {
+    canchaRules, localRules, perfilFinancieroRules, horarioRules,
+    estadoCanchaRules, estadoSlotRules, ofertaRules
+} = require('../middleware/validators');
 
 module.exports = (verificarToken) => {
     
