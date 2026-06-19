@@ -5,7 +5,12 @@ let transporter = null;
 function getTransporter() {
   if (transporter) return transporter;
 
-  if (process.env.GMAIL_CLIENT_ID && process.env.GMAIL_CLIENT_SECRET && process.env.GMAIL_REFRESH_TOKEN) {
+  if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+    transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+    });
+  } else if (process.env.GMAIL_CLIENT_ID && process.env.GMAIL_CLIENT_SECRET && process.env.GMAIL_REFRESH_TOKEN) {
     transporter = nodemailer.createTransport({
       service: 'gmail',
       auth: {
@@ -15,11 +20,6 @@ function getTransporter() {
         clientSecret: process.env.GMAIL_CLIENT_SECRET,
         refreshToken: process.env.GMAIL_REFRESH_TOKEN
       }
-    });
-  } else if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-    transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
     });
   } else {
     transporter = null;
@@ -51,7 +51,13 @@ async function sendMail({ to, subject, html }) {
     console.warn('⚠️ Email no configurado. Omite envío a:', to);
     return;
   }
-  await t.sendMail({ from: `"PichangaGo" <${process.env.EMAIL_USER}>`, to, subject, html });
+  try {
+    await t.sendMail({ from: `"PichangaGo" <${process.env.EMAIL_USER}>`, to, subject, html });
+    console.log(`✅ Email enviado a ${to}: ${subject}`);
+  } catch (err) {
+    console.error(`❌ Error al enviar email a ${to}:`, err.message);
+    throw err;
+  }
 }
 
 async function sendWelcomeEmail({ email, nombre, rol }) {
