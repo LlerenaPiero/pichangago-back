@@ -1,5 +1,4 @@
 const express = require('express');
-const cors = require('cors');
 const sql = require('mssql');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -40,7 +39,19 @@ app.use(generalLimiter);
 const helmet = require('helmet');
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
-app.use(cors({ origin: ORIGINS_ALLOWED }));
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && ORIGINS_ALLOWED.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
 app.use(express.json({ limit: '10mb' }));
 
 const sqlConfig = {
