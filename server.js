@@ -21,6 +21,7 @@ const {
 
 const intentosUsuarios = {};
 const app = express();
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 
 if (!process.env.JWT_SECRET || !process.env.REFRESH_TOKEN_SECRET) {
@@ -48,18 +49,12 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin) {
-    console.log(`[CORS] origin=${origin} allowed=${JSON.stringify(ORIGINS_ALLOWED)}`);
-    const match = ORIGINS_ALLOWED.includes(origin);
-    if (match) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-      res.setHeader('Vary', 'Origin');
-    } else {
-      console.log(`[CORS] ORIGIN NOT ALLOWED: ${origin}`);
-    }
+  if (origin && ORIGINS_ALLOWED.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Vary', 'Origin');
   }
   if (req.method === 'OPTIONS') {
     return res.status(204).end();
