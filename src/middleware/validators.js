@@ -93,6 +93,8 @@ const localRules = [
   handleValidationErrors
 ];
 
+const CCI_BANK_MAP = { '0002': 'BCP', '0003': 'Interbank', '0011': 'BBVA' };
+
 const perfilFinancieroRules = [
   body('ruc')
     .matches(/^\d{11}$/).withMessage('El RUC debe tener exactamente 11 dígitos.'),
@@ -102,8 +104,19 @@ const perfilFinancieroRules = [
   body('cci')
     .matches(/^\d{20}$/).withMessage('El CCI debe tener exactamente 20 dígitos.'),
   body('banco')
-    .trim().notEmpty().withMessage('El banco es obligatorio.')
-    .isLength({ max: 50 }).withMessage('El banco no puede exceder 50 caracteres.'),
+    .optional({ values: 'falsy' })
+    .trim()
+    .isLength({ max: 50 }).withMessage('El banco no puede exceder 50 caracteres.')
+    .custom((value, { req }) => {
+      const cci = req.body.cci;
+      if (!cci || cci.length < 4) return true;
+      const prefix = cci.substring(0, 4);
+      const expected = CCI_BANK_MAP[prefix];
+      if (expected && value !== expected) {
+        throw new Error(`El banco "${value}" no coincide con el CCI. Según el código, el banco debe ser "${expected}".`);
+      }
+      return true;
+    }),
   handleValidationErrors
 ];
 
@@ -144,6 +157,21 @@ const ofertaRules = [
   handleValidationErrors
 ];
 
+const updateProfileRules = [
+  body('nombre')
+    .optional().trim()
+    .isLength({ max: 50 }).withMessage('El nombre no puede exceder 50 caracteres.')
+    .matches(/^[a-zA-ZáéíóúñÑ\s]+$/).withMessage('El nombre solo puede contener letras y espacios.'),
+  body('apellido')
+    .optional().trim()
+    .isLength({ max: 50 }).withMessage('El apellido no puede exceder 50 caracteres.')
+    .matches(/^[a-zA-ZáéíóúñÑ\s]+$/).withMessage('El apellido solo puede contener letras y espacios.'),
+  body('telefono')
+    .optional({ values: 'falsy' }).trim()
+    .matches(/^\d{9}$/).withMessage('El teléfono debe tener exactamente 9 dígitos.'),
+  handleValidationErrors
+];
+
 module.exports = {
   registerRules,
   loginRules,
@@ -155,5 +183,6 @@ module.exports = {
   horarioRules,
   estadoCanchaRules,
   estadoSlotRules,
-  ofertaRules
+  ofertaRules,
+  updateProfileRules
 };

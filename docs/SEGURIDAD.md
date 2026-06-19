@@ -1,377 +1,367 @@
 # Seguridad — PichangaGo Backend
 
-Documentación de las medidas de seguridad implementadas.
+## Índice
+
+1. [JWT (JSON Web Tokens)](#1-jwt-json-web-tokens)
+2. [OWASP Top 10 (2021)](#2-owasp-top-10-2021)
+3. [Rate Limiting](#3-rate-limiting)
+4. [Validación de Entradas](#4-validación-de-entradas)
+5. [Manejo de Contraseñas](#5-manejo-de-contraseñas)
+6. [Headers de Seguridad](#6-headers-de-seguridad)
+7. [CORS](#7-cors)
+8. [Socket.IO — Autenticación en Tiempo Real](#8-socketio--autenticación-en-tiempo-real)
+9. [Subida de Archivos](#9-subida-de-archivos)
+10. [Manejo de Errores](#10-manejo-de-errores)
+11. [Base de Datos](#11-base-de-datos)
+12. [Observaciones y Recomendaciones](#12-observaciones-y-recomendaciones)
 
 ---
 
-## Middleware de seguridad
+## 1. JWT (JSON Web Tokens)
 
-```
-src/middleware/
-├── errorHandler.js     # Captura multer, payload, errores no manejados (Express 5)
-├── roleMiddleware.js   # verificarRol — autorización por rol
-├── security.js         # Rate limiters (auth, register, forgot, refresh, global)
-├── upload.js           # Multer: fileFilter (solo imágenes), límite 5MB
-└── validators.js       # express-validator (12 conjuntos de reglas)
-```
+### Estrategia de autenticación
 
-La autenticación JWT (`verificarToken`) está definida inline en `server.js`.
+El backend implementa autenticación stateless mediante **Access Token + Refresh Token**.
 
----
+| Propiedad | Access Token | Refresh Token |
+|-----------|-------------|---------------|
+| Duración | 15 minutos (`expiresIn: '15m'`) | 7 días (`expiresIn: '7d'`) |
+| Firma | `JWT_SECRET` | `REFRESH_TOKEN_SECRET` |
+| Propósito | Autenticar requests a la API | Obtener nuevos Access Tokens |
+| Almacenamiento | Memoria del frontend (variable JS) | `localStorage` / `httpOnly cookie` |
 
-## OWASP Top 10 2021
-
-| # | Categoría | Medidas implementadas | Archivo(s) |
-|:-:|-----------|-----------------------|------------|
-| A01 | Broken Access Control | JWT con rol en payload; `verificarRol('DUENO', 'DUEÑO')` en todas las rutas de dueño; verificación de propiedad (dueño duelo de cada local/cancha/horario/slot/reserva) | `roleMiddleware.js`, `dueno.routes.js`, todos los controllers |
-| A02 | Cryptographic Failures | bcryptjs (salt 10) para contraseñas; JWT secrets en `.env` (JWT_SECRET, REFRESH_TOKEN_SECRET); access token 15min, refresh 7d; `TOKEN_VERSION` en payload para invalidación global | `.env`, `server.js` |
-| A03 | Injection | **100% parametrizado** — todas las queries SQL usan `sql.input()` con tipo explícito. Cero concatenación de valores. Hasta los filtros dinámicos usan parámetros (`@distrito`, `@fecha_desde`, etc.) | Todos los controllers |
-| A04 | Insecure Design | Rate limiting doble (IP via `express-rate-limit` + email via `intentosUsuarios`); forgot-password no revela si el email existe; bloqueo tras 3 login fallidos; validación de entrada en todos los endpoints | `server.js`, `security.js`, `validators.js` |
-| A05 | Security Misconfiguration | **helmet** para headers HTTP seguros; CORS configurado; `express.json({ limit: '10mb' })`; error handler centralizado al final de la cadena; `DB_ENCRYPT`/`DB_TRUST_CERT` via env vars | `server.js`, `errorHandler.js` |
-| A06 | Vulnerable Components | Dependencias auditables con `npm audit` | `package.json` |
-| A07 | Identification & Auth Failures | JWT access (15min) + refresh (7d) con secrets separados; `TOKEN_VERSION` invalida sesiones globalmente en logout; rate limiters por endpoint + bloqueo por email tras 3 fallos; cuenta desactivada bloquea login/refresh | `server.js`, `security.js` |
-| A08 | Data Integrity Failures | Transacciones SQL (commit/rollback) en registro, creación de cancha, edición de cancha, horarios y ofertas; rollback automático si falla cualquier paso | `server.js`, `dueno.controller.js` |
-| A09 | Security Logging & Monitoring | `console.error` con prefijo 🚨 para errores internos; errores de validación con detalles de campo (`detalles[]`) | Todos los controllers, `validators.js` |
-| A10 | SSRF | No aplica — el backend no hace fetch a URLs externas | — |
-
----
-
-## 1. Autenticación JWT
-
-Middleware `verificarToken` (inline en `server.js`):
-
-- Extrae token del header `Authorization: Bearer <token>`
-- Verifica firma con `JWT_SECRET` (desde `.env`, fallback seguro)
-- Adjunta `req.user = { id, rol, nombre, tokenVersion }`
-- Rechaza con `401` si token falta, expiró o es inválido
-
-### Payload del JWT
+### Payload del token
 
 ```json
 {
-  "id": "USR-100001",
+  "id": "USR-999001",
   "rol": "DUENO",
-  "nombre": "Carlos",
+  "nombre": "Ricardo",
   "tokenVersion": 1,
-  "iat": 1718500000,
-  "exp": 1718500900
+  "iat": 1747612345,
+  "exp": 1747613245
 }
 ```
 
-### Token version (logout global)
+### Flujo de autenticación
 
-Cada usuario tiene `TOKEN_VERSION` en BD (entero, default 1). Todos los JWTs incluyen este número.
-
-1. Al autenticarse, el token se firma con la versión actual de BD
-2. `/api/validate-session` y `/api/refresh` verifican que `tokenVersion` coincida con BD
-3. `POST /api/logout` incrementa `TOKEN_VERSION` → invalida **todos** los tokens anteriores
-4. Cualquier endpoint protegido que recibe un token con versión desactualizada obtiene `403`
-
----
-
-## 2. Helmet (seguridad de headers HTTP)
-
-```javascript
-const helmet = require('helmet');
-app.use(helmet());
+```
+Login → JWT (access 15m + refresh 7d) → 
+  Cada request: Authorization: Bearer <accessToken> → 
+  Si expira: POST /api/refresh con refreshToken → Nuevo accessToken
 ```
 
-Headers configurados automáticamente:
+### Token Version (TOKEN_VERSION)
 
-| Header | Valor |
-|--------|-------|
-| `X-Content-Type-Options` | `nosniff` |
-| `X-Frame-Options` | `DENY` |
-| `X-XSS-Protection` | `0` (desactivado, confiar en CSP moderno) |
-| `Strict-Transport-Security` | `max-age=15552000; includeSubDomains` (solo si HTTPS) |
-| `Content-Security-Policy` | Default (restringe scripts/elementos embebidos) |
-| `X-Powered-By` | Eliminado (no se revela Express) |
+Mecanismo de **invalidación global de sesión**. Cada usuario tiene un `TOKEN_VERSION` en la tabla `Usuario`:
+
+- **Login**: el JWT se firma con el `tokenVersion` actual del usuario.
+- **Cada request verificado**: se compara `req.user.tokenVersion` con el valor en BD.
+- **Logout global** (`POST /api/logout`): incrementa `TOKEN_VERSION`, invalidando **todos** los JWT emitidos previamente para ese usuario.
+- **Refresh**: también verifica `tokenVersion`, evitando renovar tokens de sesiones cerradas.
+
+Implementado en:
+- `GET /api/validate-session` — validación de sesión actual
+- `POST /api/refresh` — renovación de tokens
+- `io.use()` — conexión Socket.IO
+
+### Middleware de verificación
+
+```javascript
+// server.js (inline) — usado por todas las rutas protegidas
+const verificarToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Sin token.' });
+  try {
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Token expirado.' });
+  }
+};
+```
+
+> **Nota**: Existe un middleware duplicado en `src/middleware/auth.js` que **no se utiliza**. Todas las rutas usan la función inline de `server.js`.
 
 ---
 
-## 3. CORS
+## 2. OWASP Top 10 (2021)
+
+### A01 — Broken Access Control ✅
+
+| Medida | Implementación |
+|--------|---------------|
+| Role-based access control | `verificarRol('DUENO', 'DUEÑO')` en `src/middleware/roleMiddleware.js` |
+| Protección por token | `verificarToken` requerido en todas las rutas de negocio |
+| Invalidación de sesión | `TOKEN_VERSION` + Logout global |
+| Rutas públicas vs privadas | Catálogo de canchas (`/api/canchas`) es público; `api/dueno/*` requiere auth |
+
+### A02 — Cryptographic Failures ✅
+
+| Medida | Implementación |
+|--------|---------------|
+| Hashing de contraseñas | `bcryptjs` con 10 salt rounds |
+| JWT firmado | Algoritmo HMAC con `JWT_SECRET` y `REFRESH_TOKEN_SECRET` desde `.env` |
+| Conexión BD cifrada | `DB_ENCRYPT=true`, `trustServerCertificate=false` |
+| Secrets en variables de entorno | `.env` fuera del repositorio (incluido en `.gitignore`) |
+
+### A03 — Injection ✅
+
+| Medida | Implementación |
+|--------|---------------|
+| SQL Injection prevenido | **100% parameterized queries** con `mssql` `request.input()` — nunca hay concatenación de strings SQL |
+| Input validation | `express-validator` en todos los endpoints críticos (registro, login, creación de canchas, etc.) |
+| File upload validation | Filtro por extensión (`whitelist`: JPG, PNG, WEBP, AVIF) + límite de 5MB |
+
+Ejemplo de query parametrizada:
+```javascript
+request.input('id_user', sql.Char(10), idUser)
+  .input('email', sql.VarChar(100), email)
+  .query('SELECT EMAIL FROM Usuario WHERE EMAIL = @email');
+```
+
+### A04 — Insecure Design ✅
+
+| Medida | Implementación |
+|--------|---------------|
+| Rate limiting en auth | Login: 5 intentos/15min, Registro: 3/hora, Forgot Password: 3/hora |
+| Límite general | 100 requests/minuto global |
+| Bloqueo por intentos fallidos | 3 fallos → bloqueo de 15 minutos (in-memory) |
+| Transacciones SQL | Registro de dueño usa `Transaction` para atomicidad |
+
+### A05 — Security Misconfiguration ⚠️
+
+| Medida | Estado |
+|--------|--------|
+| Helmet (security headers) | ✅ Activado con excepción para `crossOriginResourcePolicy: cross-origin` (necesario para imágenes) |
+| CORS | ⚠️ `origin: '*'` — permite cualquier origen. Debería restringirse al dominio del frontend |
+| Error details en producción | ✅ No se filtran stack traces (error handler genérico) |
+| HTTP methods | ❌ No hay restricción explícita de métodos HTTP |
+
+### A06 — Vulnerable and Outdated Components ⚠️
+
+Dependencias actuales del `package.json`:
+
+| Paquete | Versión | Estado |
+|---------|---------|--------|
+| express | 5.2.1 | ✅ Actual |
+| bcryptjs | 3.0.3 | ✅ Actual |
+| jsonwebtoken | 9.0.3 | ✅ Actual |
+| helmet | 8.0.0 | ✅ Actual |
+| express-rate-limit | 7.5.0 | ✅ Actual |
+| express-validator | 7.2.1 | ✅ Actual |
+| mssql | 12.5.4 | ✅ Actual |
+| multer | 1.4.5-lts.2 | ⚠️ LTS, pero versión antigua |
+| socket.io | 4.8.1 | ✅ Actual |
+| nodemailer | 8.0.7 | ✅ Actual |
+| cors | 2.8.6 | ✅ Actual |
+| dotenv | 17.4.2 | ✅ Actual |
+
+### A07 — Identification and Authentication Failures ✅
+
+| Medida | Implementación |
+|--------|---------------|
+| Contraseña mínima | 6 caracteres (validado en `registerRules` y `resetPasswordRules`) |
+| Rate limiting en login | 5 intentos cada 15 minutos (`authLimiter`) |
+| Bloqueo progresivo | 3 intentos fallidos → bloqueo 15 min (in-memory) |
+| Forgot password con JWT | Token de 15 minutos para restablecer contraseña |
+| Recuperación no informativa | Mensaje genérico: "Si el correo está registrado..." |
+
+### A08 — Software and Data Integrity Failures ❌
+
+| Riesgo | Estado |
+|--------|--------|
+| Subida de imágenes sin verificación de contenido | ⚠️ Solo se valida extensión, no contenido real del archivo |
+| Dependencias sin integrity check | ❌ No se verifica `package-lock.json` integrity |
+
+### A09 — Security Logging and Monitoring ⚠️
+
+| Medida | Estado |
+|--------|--------|
+| Log de errores | `console.error` con prefijo 🚨 |
+| Log de conexiones Socket | `console.log` de conexiones/desconexiones |
+| Sin sistema centralizado de logs | ❌ No hay integración con servicios como Azure Monitor, CloudWatch, etc. |
+
+### A10 — Server-Side Request Forgery (SSRF) ✅
+
+No hay funcionalidad que acepte URLs arbitrarias para hacer requests desde el servidor. Las únicas URLs externas son configuradas vía variables de entorno (Azure Storage, Base de Datos).
+
+---
+
+## 3. Rate Limiting
+
+Configurado con `express-rate-limit` en `src/middleware/security.js`:
+
+| Limiter | Ventana | Máximo | Endpoints |
+|---------|---------|--------|-----------|
+| `generalLimiter` | 1 minuto | 100 requests | Global (app.use) |
+| `authLimiter` | 15 minutos | 5 intentos | `POST /api/login` |
+| `registerLimiter` | 1 hora | 3 registros | `POST /api/register` |
+| `forgotPasswordLimiter` | 1 hora | 3 solicitudes | `POST /api/forgot-password`, `POST /api/reset-password` |
+| `refreshLimiter` | 1 minuto | 10 intentos | `POST /api/refresh` |
+
+Además, control de intentos de login in-memory:
+```javascript
+const intentosUsuarios = {};
+// 3 intentos fallidos → bloqueo de 15 minutos
+delete intentosUsuarios[email]; // se reinicia al hacer login exitoso
+```
+
+---
+
+## 4. Validación de Entradas
+
+Todas las validaciones en `src/middleware/validators.js` usando `express-validator`:
+
+| Endpoint | Validaciones |
+|----------|-------------|
+| `POST /api/register` | Email válido + normalizeEmail, password 6-100 chars, nombre/apellido solo letras, teléfono 9 dígitos, rol enum |
+| `POST /api/login` | Email válido, password no vacío |
+| `POST /api/forgot-password` | Email válido |
+| `POST /api/reset-password` | Token no vacío, password 6-100 chars |
+| `POST /api/dueno/canchas` | idLocal, nombre, descripción, precios (float, rangos acotados) |
+| `POST /api/dueno/locales` | nombre, dirección, distrito, referencia (máximos de caracteres) |
+| `PUT /api/dueno/perfil-financiero` | RUC 11 dígitos, CCI 20 dígitos, banco opcional con validación contra prefijo CCI |
+| `POST /api/dueno/canchas/:idCancha/horarios` | Array de horarios, diaSemana 0-6, horas HH:00/HH:30, tipoPrecio enum |
+| Varios | Estados permitidos mediante `isIn()` |
+
+Todas las validaciones usan `handleValidationErrors` que devuelve errores con campo y mensaje:
+```json
+{
+  "error": "Datos inválidos.",
+  "detalles": [{ "campo": "email", "mensaje": "Email inválido." }]
+}
+```
+
+---
+
+## 5. Manejo de Contraseñas
+
+- **Algoritmo**: `bcryptjs` con `genSalt(10)` + `hash(password, salt)`
+- **Verificación**: `bcrypt.compare(password, hash)`
+- **Reset**: Token JWT de 15 minutos enviado por email (vía nodemailer/Gmail)
+- **Seguridad del reset**: El token contiene `{ id, email }` y se verifica antes de actualizar la contraseña
+
+---
+
+## 6. Headers de Seguridad
+
+Middleware `helmet` (v8) activado:
+
+```javascript
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
+```
+
+La excepción `cross-origin` es necesaria para que el frontend (en otro puerto/origen) pueda cargar imágenes servidas por el proxy `/api/uploads`.
+
+Headers que Helmet configura automáticamente:
+- `Content-Security-Policy`
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: SAMEORIGIN`
+- `X-XSS-Protection: 0` (deprecated, pero CSP lo cubre)
+- `Strict-Transport-Security`
+- `Referrer-Policy`
+
+---
+
+## 7. CORS
 
 ```javascript
 app.use(cors());
 ```
 
-En desarrollo permite todos los orígenes. Para producción, restringir:
+Equivalente a `cors({ origin: '*' })`. ⚠️ Permite cualquier origen.
 
-```env
-CORS_ORIGIN=https://tudominio.com
-```
+> **Recomendación**: Restringir al origen del frontend:
+> ```javascript
+> app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
+> ```
+
+---
+
+## 8. Socket.IO — Autenticación en Tiempo Real
+
+Socket.IO valida JWT en el handshake de conexión:
 
 ```javascript
-app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',') || '*' }));
-```
-
----
-
-## 4. Rate limiting (`src/middleware/security.js`)
-
-### Por endpoint (express-rate-limit, IP-based)
-
-| Endpoint | Límite | Ventana | Código |
-|----------|--------|---------|--------|
-| `POST /api/login` | 5 intentos | 15 min | `429` |
-| `POST /api/register` | 3 solicitudes | 1 hora | `429` |
-| `POST /api/forgot-password` | 3 solicitudes | 1 hora | `429` |
-| `POST /api/refresh` | 10 solicitudes | 1 min | `429` |
-| Global (todos los endpoints) | 100 solicitudes | 1 min | `429` |
-
-### Por email (in-memory, login)
-
-Además del rate limiter por IP, login tiene bloqueo por **email**:
-
-- 3 intentos fallidos de contraseña → bloqueo de **15 minutos**
-- Se usa un objeto `intentosUsuarios` en memoria (`Map<string, {intentos, fechaBloqueo}>`)
-- La clave es el email ingresado (no la IP)
-- Al iniciar sesión correctamente se reinicia el contador
-
-### Formato de respuesta (todos)
-
-```json
-{ "status": "error", "error": "Demasiados intentos. Intenta de nuevo en 15 minutos." }
-```
-
----
-
-## 5. Control de acceso por roles (`src/middleware/roleMiddleware.js`)
-
-```javascript
-const verificarRol = (...rolesPermitidos) => (req, res, next) => {
-  if (!req.user?.rol) return res.status(403).json({ status: 'error', error: 'Acceso denegado.' });
-  if (!rolesPermitidos.includes(req.user.rol)) return res.status(403).json({ status: 'error', error: 'No tienes permiso.' });
-  next();
-};
-```
-
-Acepta `'DUENO'` y `'DUEÑO'` para manejar la eñe del frontend.
-
-Todas las rutas de `/api/dueno/*` usan:
-```javascript
-const auth = [verificarToken, verificarRol('DUENO', 'DUEÑO')];
-```
-
-Además del rol, cada controller verifica **propiedad** del recurso:
-- `obtenerIdDueno(idUser)` → obtiene el `ID_Dueño` asociado al usuario autenticado
-- Todas las operaciones filtran por `ID_Dueño` en sus queries
-- Si un dueño intenta acceder a un recurso de otro dueño, recibe `403`
-
----
-
-## 6. Validación de entrada (`src/middleware/validators.js`)
-
-12 conjuntos de reglas usando `express-validator`:
-
-| Endpoint | Reglas |
-|----------|--------|
-| `POST /api/register` | email válido, password 6-100 chars, nombre/apellido obligatorios (max 50), rol enum |
-| `POST /api/login` | email válido, password obligatorio |
-| `POST /api/forgot-password` | email válido |
-| `POST /api/reset-password` | token obligatorio, newPassword 6-100 chars |
-| `POST /api/dueno/locales` | nombre (max 100), direccion (max 150), distrito (max 50), referencia opcional (max 200) |
-| `PUT /api/dueno/locales/:idLocal` | mismo que POST locales |
-| `POST /api/dueno/canchas` | **idLocal** obligatorio, nombre (max 50), descripción opcional (max 150), precioBase float |
-| `PUT /api/dueno/perfil-financiero` | RUC 11 dígitos exactos, CCI 20 dígitos exactos, razonSocial/banco obligatorios |
-| `POST /api/dueno/canchas/:idCancha/horarios` | Array `horarios[]` con diaSemana 0-6, horaInicio/horaFin `HH:00|HH:30`, tipoPrecio enum |
-| `PATCH /api/dueno/canchas/:idCancha/estado` | estado enum `DISPONIBLE\|SUSPENDIDO` |
-| `PUT /api/dueno/slots/:idSlot/estado` | nuevoEstado enum `DISPONIBLE\|BLOQUEADO\|RESERVADO\|NO_ASISTIO` |
-| `POST /api/dueno/slots/:idSlot/oferta` | porcentajeDescuento 1-100, precioOfertado float, fechaExpira opcional ISO8601 |
-
-Errores devuelven:
-```json
-{
-  "status": "error",
-  "error": "Datos inválidos.",
-  "detalles": [
-    { "campo": "idLocal", "mensaje": "El ID del local es obligatorio." }
-  ]
-}
-```
-
----
-
-## 7. Manejo centralizado de errores (`src/middleware/errorHandler.js`)
-
-Middleware Express 5 al final de la cadena (`app.use(errorHandler)`):
-
-| Tipo | Código | Mensaje |
-|------|--------|---------|
-| Multer: archivo > 5MB | `400` | `"La foto no puede superar los 5 MB."` |
-| Multer: campo inesperado | `400` | `"Campo de archivo inesperado."` |
-| Multer: tipo no permitido | `400` | `"Solo se permiten imágenes JPG, PNG, WEBP o AVIF"` |
-| Payload demasiado grande | `413` | `"El cuerpo de la solicitud es demasiado grande."` |
-| Error no manejado | `500` | Sin stack trace en producción |
-
----
-
-## 8. Consultas parametrizadas (SQL Injection)
-
-El **100%** de las queries SQL usan `input()` de mssql con tipo explícito:
-
-```javascript
-// ✅ Correcto
-.input('email', sql.VarChar(100), email)
-.query('SELECT * FROM Usuario WHERE EMAIL = @email')
-
-// ✅ Filtros dinámicos también son parametrizados
-if (distrito) {
-  query += ' AND L.Distrito LIKE @distrito';
-  request.input('distrito', sql.VarChar(50), `%${distrito}%`);
-}
-```
-
-No existe ni una sola concatenación de strings para valores en SQL.
-
----
-
-## 9. Transacciones SQL
-
-Operaciones multi-tabla usan `sql.Transaction` con commit/rollback:
-
-| Operación | Tablas | Archivo |
-|-----------|--------|---------|
-| Registro de usuario | `Usuario` + `Dueño` | `server.js` |
-| Crear cancha | `Canchas` + `Fotos_Cancha` | `dueno.controller.js` |
-| Editar cancha (con foto) | `Canchas` + `Fotos_Cancha` | `dueno.controller.js` |
-| Configurar horarios | Borra `Horarios` + `Slots`, inserta nuevos | `dueno.controller.js` |
-| Crear oferta | `Oferta` + actualiza `Slots.Estado` | `dueno.controller.js` |
-
-Si cualquier paso falla, la transacción se revierte completamente.
-
----
-
-## 10. Carga de archivos segura (`src/middleware/upload.js`)
-
-```javascript
-const upload = multer({
-  storage: diskStorage({ destination: 'uploads/canchas/' }),
-  fileFilter: solo imagenes (JPG, PNG, WEBP, AVIF),
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB
-});
-```
-
-- Solo imágenes permitidas (filtro por extensión)
-- Máximo 5MB
-- Nombre generado: `${Date.now()}-${random}${ext}` (evita colisiones y path traversal)
-- Al eliminar una foto, también se borra el archivo físico con `fs.unlink`
-
----
-
-## 11. Socket.io — autenticación en tiempo real
-
-```javascript
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   const token = socket.handshake.auth?.token;
-  if (!token) return next(new Error('Sin token.'));
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    socket.user = decoded;
-    next();
-  } catch {
-    next(new Error('Token inválido.'));
-  }
+  const decoded = jwt.verify(token, process.env.JWT_SECRET);
+  // Verifica TOKEN_VERSION y ESTADO del usuario en BD
+  socket.user = decoded;
+  next();
 });
 ```
 
-- Conexión requiere JWT válido en `auth.token`
-- Cada socket se une a `dueño:<userId>` (sala personal)
-- Solo recibe notificaciones de sus propias canchas
+- El usuario se une a una sala `dueño:<ID_USER>` para notificaciones privadas.
+- Si el token ha sido invalidado por logout global, la conexión es rechazada.
 
 ---
 
-## 12. Formato de respuesta consistente
+## 9. Subida de Archivos
 
-**Todas** las respuestas de error siguen el mismo formato:
+Middleware `multer` con `memoryStorage` (no se guarda en disco):
 
-```json
-{ "status": "error", "error": "Mensaje descriptivo." }
-```
+| Medida | Configuración |
+|--------|--------------|
+| Almacenamiento | Memoria → Azure Blob Storage |
+| Extensiones permitidas | `.jpg`, `.jpeg`, `.png`, `.webp`, `.avif` |
+| Tamaño máximo | 5 MB |
+| Límite de body | 10 MB (`express.json({ limit: '10mb' })`) |
 
-Incluyendo:
-- Rate limiters (IP + email)
-- Validaciones de express-validator
-- Errores de multer (archivo muy grande, tipo no permitido)
-- Errores de multer en el errorHandler centralizado
-- Bloqueo manual por 3 intentos fallidos de login
-- Errores de SQL (parametrizados)
-- Errores internos del servidor (sin stack trace)
-
-Respuestas exitosas:
-```json
-{ "status": "success", "data": { ... } }
-// o
-{ "status": "success", "mensaje": "Operación exitosa.", "idLocal": "..." }
-```
+Validación de tipo de archivo por extensión (no por MIME type).
 
 ---
 
-## 13. Límite de payload JSON
+## 10. Manejo de Errores
 
-```javascript
-app.use(express.json({ limit: '10mb' }));
-```
+Middleware centralizado en `src/middleware/errorHandler.js`:
 
-Cuerpos mayores a 10MB son rechazados con `413 Payload Too Large`.
-
----
-
-## 14. Configuración de BD segura
-
-```env
-DB_ENCRYPT=false        # true en producción (Azure)
-DB_TRUST_CERT=true      # false en producción
-```
-
-Los valores se leen desde `.env`:
-```javascript
-options: {
-  encrypt: process.env.DB_ENCRYPT === 'true',
-  trustServerCertificate: process.env.DB_TRUST_CERT === 'true'
-}
-```
+- **Multer errors**: Archivo muy grande, campo inesperado, tipo no permitido → 400
+- **Entity too large**: Body > 10MB → 413
+- **Errores genéricos**: Mensaje + 500 (sin stack trace)
+- **Unhandled errors**: `console.error` con prefijo 🚨
 
 ---
 
-## 15. Secrets almacenados en `.env`
+## 11. Base de Datos
 
-| Variable | Propósito |
-|----------|-----------|
-| `JWT_SECRET` | Firma de access tokens |
-| `REFRESH_TOKEN_SECRET` | Firma de refresh tokens |
-| `DB_USER` / `DB_PASSWORD` | Credenciales de BD |
-| `EMAIL_USER` / `EMAIL_PASS` | Credenciales de nodemailer (Gmail App Password) |
-
----
-
-## Dependencias de seguridad
-
-| Paquete | Versión | Propósito |
-|---------|---------|-----------|
-| `helmet` | ^8 | Headers HTTP de seguridad |
-| `express-rate-limit` | ^7 | Rate limiting por IP |
-| `express-validator` | ^7 | Validación y sanitización de entrada |
-| `bcryptjs` | ^3 | Hash de contraseñas (salt 10) |
-| `jsonwebtoken` | ^9 | JWT access + refresh tokens |
-| `multer` | ^1 | Carga de archivos con filtro seguro |
+| Medida | Estado |
+|--------|--------|
+| Conexión cifrada | TLS activo (`encrypt: true`) |
+| Certificado no verificado local | `trustServerCertificate: false` (seguro en producción) |
+| Pool de conexiones | Máximo 10 conexiones concurrentes |
+| Queries parametrizadas | 100% de las consultas |
+| Transacciones | Usadas en registro de dueño para atomicidad |
 
 ---
 
-## Apéndice: Códigos HTTP usados
+## 12. Observaciones y Recomendaciones
 
-| Código | Significado |
-|--------|-------------|
-| `200` | OK |
-| `201` | Recurso creado |
-| `400` | Datos inválidos (validación) |
-| `401` | No autenticado / token inválido |
-| `403` | Prohibido (rol incorrecto, recurso ajeno, sesión cerrada) |
-| `404` | Recurso no encontrado |
-| `413` | Payload demasiado grande |
-| `429` | Rate limit excedido |
-| `500` | Error interno del servidor |
+### Críticas
 
----
+| # | Observación | Riesgo | Recomendación |
+|---|-------------|--------|---------------|
+| 1 | CORS con origen `*` | Medio | Restringir a `FRONTEND_URL` |
+| 2 | Fallback de JWT secrets hardcodeados | Medio | Validar en startup que `JWT_SECRET` y `REFRESH_TOKEN_SECRET` estén definidos, no usar fallbacks |
+| 3 | `verificarToken` duplicado (`auth.js` no usado) | Bajo | Eliminar `src/middleware/auth.js` si no se utiliza |
 
-_Actualizado: 16/06/2026 — Backend v1.0_
+### Medias
+
+| # | Observación | Riesgo | Recomendación |
+|---|-------------|--------|---------------|
+| 4 | Sin refresh token rotation | Medio | Rotar refresh token en cada uso, invalidar el anterior |
+| 5 | Bloqueo de login in-memory (se pierde al reiniciar) | Bajo | Migrar a Redis o tabla en BD para persistencia |
+| 6 | Sin validación de MIME type en uploads | Bajo | Validar `file.mimetype` además de la extensión |
+| 7 | Sin protección CSRF | Bajo | SPA con JWT en memoria + CORS mitigado, riesgo bajo. Agregar si se usan cookies |
+
+### Bajas
+
+| # | Observación | Riesgo | Recomendación |
+|---|-------------|--------|---------------|
+| 8 | Sin logs estructurados | Bajo | Implementar logger (Winston/Pino) con niveles |
+| 9 | Sin monitoreo de seguridad | Bajo | Integrar Azure Application Insights |
+| 10 | Sin restricción de métodos HTTP | Bajo | Agregar middleware que rechace métodos no permitidos por ruta |

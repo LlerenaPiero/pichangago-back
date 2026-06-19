@@ -214,9 +214,9 @@ const obtenerHistorialLiquidaciones = async (req, res, appPool) => {
                     L.ID_Liquid, L.Fecha_Inicio, L.Fecha_Fin,
                     L.Monto_Bruto, L.Comision_PGO, L.Monto_Neto,
                     L.NRO_Operac, L.Fecha_Transf, L.Estado,
-                    S.[Plan], S.Precio_Mens
+                    ISNULL((SELECT TOP 1 S.[Plan] FROM Suscripcion S WHERE S.ID_Dueño = L.ID_Dueño ORDER BY S.ID_SUB DESC), '') AS [Plan],
+                    ISNULL((SELECT TOP 1 S.Precio_Mens FROM Suscripcion S WHERE S.ID_Dueño = L.ID_Dueño ORDER BY S.ID_SUB DESC), 0) AS Precio_Mens
                 FROM Liquidacion L
-                INNER JOIN Suscripcion S ON L.ID_Dueño = S.ID_Dueño
                 WHERE L.ID_Dueño = @id_dueño
                 ORDER BY L.Fecha_Fin DESC
             `);
@@ -327,7 +327,9 @@ const obtenerEstadisticasOcupacion = async (req, res, appPool) => {
 // D-19: Historial de reservas completo
 const obtenerHistorialReservas = async (req, res, appPool) => {
     const idUser = req.user.id;
-    const { fecha_desde, fecha_hasta, estado } = req.query;
+    const { fecha_desde, fecha_hasta, fecha_inicio, fecha_fin, estado } = req.query;
+    const desde = fecha_desde || fecha_inicio;
+    const hasta = fecha_hasta || fecha_fin;
 
     try {
         const idDueno = await obtenerIdDueno(idUser, appPool);
@@ -355,13 +357,13 @@ const obtenerHistorialReservas = async (req, res, appPool) => {
         const request = new sql.Request(appPool);
         request.input('id_dueño', sql.Char(10), idDueno);
 
-        if (fecha_desde) {
-            query += ' AND CAST(R.Fecha_Crea AS DATE) >= @fecha_desde';
-            request.input('fecha_desde', sql.Date, fecha_desde);
+        if (desde) {
+            query += ' AND CAST(R.Fecha_Crea AS DATE) >= @desde';
+            request.input('desde', sql.Date, desde);
         }
-        if (fecha_hasta) {
-            query += ' AND CAST(R.Fecha_Crea AS DATE) <= @fecha_hasta';
-            request.input('fecha_hasta', sql.Date, fecha_hasta);
+        if (hasta) {
+            query += ' AND CAST(R.Fecha_Crea AS DATE) <= @hasta';
+            request.input('hasta', sql.Date, hasta);
         }
         if (estado) {
             query += ' AND R.Estado = @estado';
