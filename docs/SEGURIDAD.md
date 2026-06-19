@@ -103,8 +103,10 @@ const verificarToken = (req, res, next) => {
 |--------|---------------|
 | Hashing de contraseñas | `bcryptjs` con 10 salt rounds |
 | JWT firmado | Algoritmo HMAC con `JWT_SECRET` y `REFRESH_TOKEN_SECRET` desde `.env` |
+| Validación de secrets al iniciar | El servidor verifica que `JWT_SECRET` y `REFRESH_TOKEN_SECRET` existan en startup; si faltan, aborta con error |
 | Conexión BD cifrada | `DB_ENCRYPT=true`, `trustServerCertificate=false` |
 | Secrets en variables de entorno | `.env` fuera del repositorio (incluido en `.gitignore`) |
+| Envío de correos con OAuth2 | Gmail API mediante OAuth2 (client_id + client_secret + refresh_token), sin almacenar contraseñas planas |
 
 ### A03 — Injection ✅
 
@@ -135,7 +137,7 @@ request.input('id_user', sql.Char(10), idUser)
 | Medida | Estado |
 |--------|--------|
 | Helmet (security headers) | ✅ Activado con excepción para `crossOriginResourcePolicy: cross-origin` (necesario para imágenes) |
-| CORS | ⚠️ `origin: '*'` — permite cualquier origen. Debería restringirse al dominio del frontend |
+| CORS | ✅ Restringido a `FRONTEND_URL` (configurado desde `.env`) |
 | Error details en producción | ✅ No se filtran stack traces (error handler genérico) |
 | HTTP methods | ❌ No hay restricción explícita de métodos HTTP |
 
@@ -240,8 +242,9 @@ Todas las validaciones usan `handleValidationErrors` que devuelve errores con ca
 
 - **Algoritmo**: `bcryptjs` con `genSalt(10)` + `hash(password, salt)`
 - **Verificación**: `bcrypt.compare(password, hash)`
-- **Reset**: Token JWT de 15 minutos enviado por email (vía nodemailer/Gmail)
+- **Reset**: Token JWT de 15 minutos enviado por email
 - **Seguridad del reset**: El token contiene `{ id, email }` y se verifica antes de actualizar la contraseña
+- **Envío de correos**: Gmail API con OAuth2 (client_id + refresh_token), sin almacenar contraseñas del email en texto plano
 
 ---
 
@@ -270,15 +273,19 @@ Headers que Helmet configura automáticamente:
 ## 7. CORS
 
 ```javascript
-app.use(cors());
+app.use(cors({ origin: FRONTEND_URL }));
 ```
 
-Equivalente a `cors({ origin: '*' })`. ⚠️ Permite cualquier origen.
+Restringido al origen configurado en `FRONTEND_URL` (variable de entorno).  
+Tanto Express como Socket.IO usan el mismo origen restrictivo.
 
-> **Recomendación**: Restringir al origen del frontend:
-> ```javascript
-> app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
-> ```
+```javascript
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+// Express
+app.use(cors({ origin: FRONTEND_URL }));
+// Socket.IO
+const io = new Server(server, { cors: { origin: FRONTEND_URL } });
+```
 
 ---
 
@@ -345,9 +352,9 @@ Middleware centralizado en `src/middleware/errorHandler.js`:
 
 | # | Observación | Riesgo | Recomendación |
 |---|-------------|--------|---------------|
-| 1 | CORS con origen `*` | Medio | Restringir a `FRONTEND_URL` |
-| 2 | Fallback de JWT secrets hardcodeados | Medio | Validar en startup que `JWT_SECRET` y `REFRESH_TOKEN_SECRET` estén definidos, no usar fallbacks |
-| 3 | `verificarToken` duplicado (`auth.js` no usado) | Bajo | Eliminar `src/middleware/auth.js` si no se utiliza |
+| 1 | ~~CORS con origen `*`~~ | ✅ Resuelto | Restringido a `FRONTEND_URL` |
+| 2 | ~~Fallback de JWT secrets hardcodeados~~ | ✅ Resuelto | Validación en startup sin fallbacks |
+| 3 | Sin restricción de métodos HTTP | Bajo | Agregar middleware que rechace métodos no permitidos por ruta |
 
 ### Medias
 
@@ -364,4 +371,4 @@ Middleware centralizado en `src/middleware/errorHandler.js`:
 |---|-------------|--------|---------------|
 | 8 | Sin logs estructurados | Bajo | Implementar logger (Winston/Pino) con niveles |
 | 9 | Sin monitoreo de seguridad | Bajo | Integrar Azure Application Insights |
-| 10 | Sin restricción de métodos HTTP | Bajo | Agregar middleware que rechace métodos no permitidos por ruta |
+| 10 | `verificarToken` duplicado (`auth.js` no usado) | Bajo | Eliminar `src/middleware/auth.js` si no se utiliza |

@@ -3,7 +3,6 @@ const cors = require('cors');
 const sql = require('mssql');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
 const http = require('http');
 const { Server } = require('socket.io');
 require('dotenv').config();
@@ -16,23 +15,29 @@ const {
     registerRules, loginRules, forgotPasswordRules, resetPasswordRules
 } = require('./src/middleware/validators');
 const errorHandler = require('./src/middleware/errorHandler');
+const {
+  sendWelcomeEmail, sendResetPasswordEmail,
+  sendReservationConfirmation, sendOwnerNotification
+} = require('./src/config/email');
 
-const intentosUsuarios = {}; 
+const intentosUsuarios = {};
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+
+if (!process.env.JWT_SECRET || !process.env.REFRESH_TOKEN_SECRET) {
+  console.error('🚨 FALTAN VARIABLES CRITICAS: JWT_SECRET y/o REFRESH_TOKEN_SECRET no están definidas en .env');
+  process.exit(1);
+}
+
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const io = new Server(server, { cors: { origin: FRONTEND_URL } });
 
 app.use(generalLimiter);
 
 const helmet = require('helmet');
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
-});
-
-app.use(cors());
+app.use(cors({ origin: FRONTEND_URL }));
 app.use(express.json({ limit: '10mb' }));
 
 const sqlConfig = {
@@ -59,7 +64,7 @@ const verificarToken = (req, res, next) => {
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) return res.status(401).json({ status: 'error', error: 'Sin token.' });
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'clave_secreta');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
     next();
   } catch {
@@ -172,9 +177,12 @@ app.post('/api/register', registerLimiter, registerRules, async (req, res) => {
       VALUES (@id_dueño, @estado, @fecha_afiliacion, @id_user, @ruc, @razon_social, @cci, @banco)
     `);
 }
-      // Confirmar todos los cambios si todo salió bien
       await transaction.commit();
-      
+
+      sendWelcomeEmail({ email, nombre, rol }).catch(err =>
+        console.error('⚠️ Error al enviar email de bienvenida:', err.message)
+      );
+
       const esDueno = rolLimpio === 'DUEÑO' || rolLimpio === 'DUENO';
       return res.status(201).json({ 
         status: 'success', 
@@ -236,8 +244,8 @@ app.post('/api/login', authLimiter, loginRules, async (req, res) => {
       tokenVersion: versionSegura
     };
 
-    const accessToken = jwt.sign(tokenPayload, process.env.JWT_SECRET || 'clave_secreta', { expiresIn: '15m' });
-    const refreshToken = jwt.sign(tokenPayload, process.env.REFRESH_TOKEN_SECRET || 'clave_refresh', { expiresIn: '7d' });
+    const accessToken = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: '15m' });
+    const refreshToken = jwt.sign(tokenPayload, process.env.REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
 
     res.status(200).json({
       status: 'success', token: accessToken, refreshToken: refreshToken,
@@ -255,7 +263,7 @@ app.post('/api/logout', async (req, res) => {
   const { refreshToken } = req.body;
   if (refreshToken) {
     try {
-      const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET || 'clave_refresh', { ignoreExpiration: true });
+      const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET, { ignoreExpiration: true });
       await poolConnect;
       await appPool.request()
         .input('id', sql.Char(10), decoded.id)
@@ -273,7 +281,7 @@ app.post('/api/refresh', refreshLimiter, async (req, res) => {
   if (!refreshToken) return res.status(401).json({ status: 'error', error: 'Sin Refresh Token.' });
 
   try {
-    const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET || 'clave_refresh');
+    const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
     await poolConnect;
     const result = await appPool.request()
       .input('id', sql.Char(10), decoded.id)
@@ -287,7 +295,7 @@ app.post('/api/refresh', refreshLimiter, async (req, res) => {
     }
 
     const tokenPayload = { id: decoded.id, rol: decoded.rol, nombre: decoded.nombre, tokenVersion: versionEnBD };
-    const newAccessToken = jwt.sign(tokenPayload, process.env.JWT_SECRET || 'clave_secreta', { expiresIn: '15m' });
+    const newAccessToken = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: '15m' });
     res.json({ status: 'success', accessToken: newAccessToken });
   } catch (error) {
     if (error.name === 'TokenExpiredError' || error.name === 'JsonWebTokenError') {
@@ -315,31 +323,13 @@ app.post('/api/forgot-password', forgotPasswordLimiter, forgotPasswordRules, asy
     const usuario = result.recordset[0];
     const tokenToken = jwt.sign(
       { id: usuario.id.trim(), email: email },
-      process.env.JWT_SECRET || 'clave_secreta',
+      process.env.JWT_SECRET,
       { expiresIn: '15m' }
     );
 
-    const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${tokenToken}`;
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
-      to: email,
-      subject: '⚽ Restablecer tu contraseña — PichangaGo',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
-          <h2 style="color: #00b48a; text-align: center;">PichangaGo</h2>
-          <p>¡Hola, <strong>${usuario.nombre}</strong>!</p>
-          <p>Recibimos una solicitud para restablecer la contraseña. Haz clic en el botón:</p>
-          <div style="text-align: center; margin: 30px 0;">
-            <a href="${resetLink}" style="background-color: #1e2530; color: white; padding: 14px 24px; text-decoration: none; font-weight: bold; border-radius: 8px; display: inline-block;">
-              Restablecer Contraseña 🏃‍♂️💨
-            </a>
-          </div>
-          <p style="font-size: 12px; color: #64748b;">Este enlace expirará en 15 minutos.</p>
-        </div>
-      `
-    };
+    const resetLink = `${FRONTEND_URL}/reset-password?token=${tokenToken}`;
 
-    await transporter.sendMail(mailOptions);
+    await sendResetPasswordEmail({ email, nombre: usuario.nombre, resetLink });
     res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación pronto.' });
   } catch (error) {
     console.error('🚨 ERROR FATAL EN FORGOT-PASSWORD:', error);
@@ -355,7 +345,7 @@ app.post('/api/reset-password', forgotPasswordLimiter, resetPasswordRules, async
   if (!token || !newPassword) return res.status(400).json({ status: 'error', error: 'Faltan campos obligatorios' });
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'clave_secreta');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(newPassword, salt);
 
@@ -392,10 +382,9 @@ app.post('/api/canchas/reservar', verificarToken, async (req, res) => {
   try {
     await poolConnect;
 
-    // 1. Obtener información de la cancha (ID de dueño y precio base oficial)
     const canchaRes = await appPool.request()
       .input('id_cancha', sql.Char(10), idCancha)
-      .query('SELECT ID_DUEÑO, PRECIO_BASE FROM Canchas WHERE ID_CANCHA = @id_cancha');
+      .query('SELECT ID_DUEÑO, PRECIO_BASE, Nombre FROM Canchas WHERE ID_CANCHA = @id_cancha');
 
     if (canchaRes.recordset.length === 0) {
       return res.status(404).json({ status: 'error', error: 'La cancha deportiva seleccionada no existe.' });
@@ -403,13 +392,12 @@ app.post('/api/canchas/reservar', verificarToken, async (req, res) => {
 
     const idDueno = canchaRes.recordset[0].ID_DUEÑO;
     const precioBase = canchaRes.recordset[0].PRECIO_BASE;
+    const canchaNombre = canchaRes.recordset[0].Nombre;
 
-    // 2. Iniciar transacción atómica para asegurar la integridad transaccional
     const transaction = new sql.Transaction(appPool);
     await transaction.begin();
 
     try {
-      // 2.1 Verificar disponibilidad en tiempo real de todos los slots seleccionados
       for (const idSlot of slots) {
         const slotCheck = await new sql.Request(transaction)
           .input('id_slot', sql.Char(10), idSlot)
@@ -420,21 +408,17 @@ app.post('/api/canchas/reservar', verificarToken, async (req, res) => {
         }
       }
 
-      // 2.2 Generar identificadores únicos respetando las restricciones de tu base de datos
       const idReserva = `RES-${Math.floor(100000 + Math.random() * 900000)}`;
       const idComprobante = `CMP-${Math.floor(100000 + Math.random() * 900000)}`;
       const nroComprobante = `PG-${new Date().getFullYear()}-R${Math.floor(1000 + Math.random() * 9000)}`;
-      
-      // Recuperar el ID_HORARIO correspondiente al slot operativo
+
       const horarioRes = await new sql.Request(transaction)
         .input('id_slot', sql.Char(10), slots[0])
         .query('SELECT ID_HORARIO FROM SLOTS WHERE ID_SLOTS = @id_slot');
       const idHorario = horarioRes.recordset[0].ID_HORARIO;
 
-      // Calcular la comisión estándar del 5% requerida en tu DER
       const comisionQr = parseFloat(montoTotal) * 0.05;
 
-      // 2.3 Insertar el registro principal en la tabla RESERVAS
       await new sql.Request(transaction)
         .input('id_reserva', sql.Char(10), idReserva)
         .input('id_user', sql.Char(10), idUser)
@@ -451,7 +435,6 @@ app.post('/api/canchas/reservar', verificarToken, async (req, res) => {
           VALUES (@id_reserva, @id_user, @precio_base, @comi_qr, @monto_total, @estado, GETDATE(), GETDATE(), @id_slots, @id_horario, @id_cancha, @id_dueno)
         `);
 
-      // 2.4 Registrar la boleta en la tabla COMPROBANTES
       await new sql.Request(transaction)
         .input('id_comprob', sql.Char(10), idComprobante)
         .input('nmr_comprob', sql.NVarChar(20), nroComprobante)
@@ -463,7 +446,6 @@ app.post('/api/canchas/reservar', verificarToken, async (req, res) => {
           VALUES (@id_comprob, @nmr_comprob, @ruta_pdf, CAST(GETDATE() AS DATE), @id_reserva, @id_user)
         `);
 
-      // 2.5 Actualizar el estado operativo de los bloques en la tabla SLOTS
       for (const idSlot of slots) {
         await new sql.Request(transaction)
           .input('id_slot', sql.Char(10), idSlot)
@@ -471,6 +453,50 @@ app.post('/api/canchas/reservar', verificarToken, async (req, res) => {
       }
 
       await transaction.commit();
+
+      // Enviar emails en segundo plano (no bloquean la respuesta)
+      Promise.all([
+        (async () => {
+          const jugador = await appPool.request()
+            .input('id', sql.Char(10), idUser)
+            .query('SELECT EMAIL, NOMBRE FROM Usuario WHERE ID_USER = @id');
+          if (jugador.recordset.length > 0) {
+            const j = jugador.recordset[0];
+            const slotInfo = await appPool.request()
+              .input('id_slot', sql.Char(10), slots[0])
+              .query('SELECT Fecha, CONVERT(VARCHAR(5), Hora_Inicio, 108) as inicio, CONVERT(VARCHAR(5), Hora_Fin, 108) as fin FROM SLOTS WHERE ID_SLOTS = @id_slot');
+            if (slotInfo.recordset.length > 0) {
+              const s = slotInfo.recordset[0];
+              const fechaStr = new Date(s.Fecha).toISOString().split('T')[0];
+              await sendReservationConfirmation({
+                email: j.EMAIL, nombre: j.NOMBRE, canchaNombre,
+                fecha: fechaStr, horaInicio: s.inicio, horaFin: s.fin, monto: montoTotal
+              });
+            }
+          }
+        })(),
+        (async () => {
+          const duenoData = await appPool.request()
+            .input('id_dueno', sql.Char(10), idDueno)
+            .query('SELECT U.EMAIL, U.NOMBRE FROM Dueño D INNER JOIN Usuario U ON D.ID_USER = U.ID_USER WHERE D.ID_Dueño = @id_dueno');
+          if (duenoData.recordset.length > 0) {
+            const d = duenoData.recordset[0];
+            const slotInfo = await appPool.request()
+              .input('id_slot', sql.Char(10), slots[0])
+              .query('SELECT Fecha, CONVERT(VARCHAR(5), Hora_Inicio, 108) as inicio, CONVERT(VARCHAR(5), Hora_Fin, 108) as fin FROM SLOTS WHERE ID_SLOTS = @id_slot');
+            if (slotInfo.recordset.length > 0) {
+              const s = slotInfo.recordset[0];
+              const fechaStr = new Date(s.Fecha).toISOString().split('T')[0];
+              await sendOwnerNotification({
+                email: d.EMAIL, duenoNombre: d.NOMBRE,
+                jugadorNombre: req.user.nombre, canchaNombre,
+                fecha: fechaStr, horaInicio: s.inicio, horaFin: s.fin
+              });
+            }
+          }
+        })()
+      ]).catch(err => console.error('⚠️ Error en emails post-reserva:', err.message));
+
       res.status(201).json({ status: 'success', message: '¡Reserva completada con éxito!' });
 
     } catch (errTrans) {
@@ -559,7 +585,7 @@ io.use(async (socket, next) => {
   const token = socket.handshake.auth?.token;
   if (!token) return next(new Error('Sin token.'));
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'clave_secreta');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     await poolConnect;
     const result = await appPool.request()
       .input('id', sql.Char(10), decoded.id)
