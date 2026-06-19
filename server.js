@@ -29,15 +29,18 @@ if (!process.env.JWT_SECRET || !process.env.REFRESH_TOKEN_SECRET) {
   process.exit(1);
 }
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
-const io = new Server(server, { cors: { origin: FRONTEND_URL } });
+const ORIGINS_ALLOWED = (process.env.CORS_ORIGINS || process.env.FRONTEND_URL || 'http://localhost:5173')
+  .split(',').map(s => s.trim());
+const BASE_URL = ORIGINS_ALLOWED[0];
+
+const io = new Server(server, { cors: { origin: ORIGINS_ALLOWED } });
 
 app.use(generalLimiter);
 
 const helmet = require('helmet');
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
-app.use(cors({ origin: FRONTEND_URL }));
+app.use(cors({ origin: ORIGINS_ALLOWED }));
 app.use(express.json({ limit: '10mb' }));
 
 const sqlConfig = {
@@ -327,7 +330,7 @@ app.post('/api/forgot-password', forgotPasswordLimiter, forgotPasswordRules, asy
       { expiresIn: '15m' }
     );
 
-    const resetLink = `${FRONTEND_URL}/reset-password?token=${tokenToken}`;
+    const resetLink = `${BASE_URL}/reset-password?token=${tokenToken}`;
 
     await sendResetPasswordEmail({ email, nombre: usuario.nombre, resetLink });
     res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación pronto.' });

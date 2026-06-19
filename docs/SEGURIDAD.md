@@ -273,18 +273,19 @@ Headers que Helmet configura automáticamente:
 ## 7. CORS
 
 ```javascript
-app.use(cors({ origin: FRONTEND_URL }));
+app.use(cors({ origin: ORIGINS_ALLOWED }));
 ```
 
-Restringido al origen configurado en `FRONTEND_URL` (variable de entorno).  
-Tanto Express como Socket.IO usan el mismo origen restrictivo.
+Restringido a los orígenes configurados en `CORS_ORIGINS` (varios separados por coma) o `FRONTEND_URL` (uno solo).  
+Tanto Express como Socket.IO usan la misma lista restrictiva.
 
 ```javascript
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const ORIGINS_ALLOWED = (process.env.CORS_ORIGINS || process.env.FRONTEND_URL || 'http://localhost:5173')
+  .split(',').map(s => s.trim());
 // Express
-app.use(cors({ origin: FRONTEND_URL }));
+app.use(cors({ origin: ORIGINS_ALLOWED }));
 // Socket.IO
-const io = new Server(server, { cors: { origin: FRONTEND_URL } });
+const io = new Server(server, { cors: { origin: ORIGINS_ALLOWED } });
 ```
 
 ---

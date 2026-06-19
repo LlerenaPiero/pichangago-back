@@ -8,13 +8,13 @@ Antes: `cors({ origin: '*' })` — cualquier origen podía llamar a la API.
 Ahora: `cors({ origin: FRONTEND_URL })` — solo el origen configurado en `.env`.
 
 **Impacto en frontend**: Si el frontend está en `http://localhost:5173` (local) o `https://pichangago-front.vercel.app` (producción), no hay cambios.  
-Si usas otro puerto u origen, asegúrate de que `FRONTEND_URL` en el `.env` del backend lo incluya.
+Si usas otro puerto u origen, asegúrate de que `CORS_ORIGINS` en el `.env` del backend lo incluya.
 
 ```env
-FRONTEND_URL=https://pichangago-front.vercel.app
+CORS_ORIGINS=https://pichangago-front.vercel.app,http://localhost:5173
 ```
 
-**Socket.IO** también usa el mismo origen restrictivo ahora.
+**Socket.IO** también usa la misma lista de orígenes ahora.
 
 ---
 
