@@ -379,6 +379,117 @@ const duenoRoutes = require('./src/routes/dueno.routes')(verificarToken, appPool
 app.use('/api/dueno', duenoRoutes);
 
 // ==========================================
+// ⚽ ENDPOINT: PROCESAR RESERVA REAL (JUGADOR)
+// ==========================================
+app.post('/api/canchas/reservar', verificarToken, async (req, res) => {
+  const { idCancha, slots, montoTotal } = req.body;
+  const idUser = req.user.id;
+
+  if (!idCancha || !slots || slots.length === 0) {
+    return res.status(400).json({ status: 'error', error: 'Parámetros de reserva incompletos.' });
+  }
+
+  try {
+    await poolConnect;
+
+    // 1. Obtener información de la cancha (ID de dueño y precio base oficial)
+    const canchaRes = await appPool.request()
+      .input('id_cancha', sql.Char(10), idCancha)
+      .query('SELECT ID_DUEÑO, PRECIO_BASE FROM Canchas WHERE ID_CANCHA = @id_cancha');
+
+    if (canchaRes.recordset.length === 0) {
+      return res.status(404).json({ status: 'error', error: 'La cancha deportiva seleccionada no existe.' });
+    }
+
+    const idDueno = canchaRes.recordset[0].ID_DUEÑO;
+    const precioBase = canchaRes.recordset[0].PRECIO_BASE;
+
+    // 2. Iniciar transacción atómica para asegurar la integridad transaccional
+    const transaction = new sql.Transaction(appPool);
+    await transaction.begin();
+
+    try {
+      // 2.1 Verificar disponibilidad en tiempo real de todos los slots seleccionados
+      for (const idSlot of slots) {
+        const slotCheck = await new sql.Request(transaction)
+          .input('id_slot', sql.Char(10), idSlot)
+          .query("SELECT ESTADO FROM SLOTS WHERE ID_SLOTS = @id_slot AND ESTADO IN ('DISPONIBLE', 'OFERTA')");
+
+        if (slotCheck.recordset.length === 0) {
+          throw new Error('SLOT_NO_DISPONIBLE');
+        }
+      }
+
+      // 2.2 Generar identificadores únicos respetando las restricciones de tu base de datos
+      const idReserva = `RES-${Math.floor(100000 + Math.random() * 900000)}`;
+      const idComprobante = `CMP-${Math.floor(100000 + Math.random() * 900000)}`;
+      const nroComprobante = `PG-${new Date().getFullYear()}-R${Math.floor(1000 + Math.random() * 9000)}`;
+      
+      // Recuperar el ID_HORARIO correspondiente al slot operativo
+      const horarioRes = await new sql.Request(transaction)
+        .input('id_slot', sql.Char(10), slots[0])
+        .query('SELECT ID_HORARIO FROM SLOTS WHERE ID_SLOTS = @id_slot');
+      const idHorario = horarioRes.recordset[0].ID_HORARIO;
+
+      // Calcular la comisión estándar del 5% requerida en tu DER
+      const comisionQr = parseFloat(montoTotal) * 0.05;
+
+      // 2.3 Insertar el registro principal en la tabla RESERVAS
+      await new sql.Request(transaction)
+        .input('id_reserva', sql.Char(10), idReserva)
+        .input('id_user', sql.Char(10), idUser)
+        .input('precio_base', sql.Decimal(8, 2), precioBase)
+        .input('comi_qr', sql.Decimal(8, 2), comisionQr)
+        .input('monto_total', sql.Decimal(8, 2), parseFloat(montoTotal))
+        .input('estado', sql.VarChar(20), 'CONFIRMADA')
+        .input('id_slots', sql.Char(10), slots[0])
+        .input('id_horario', sql.Char(10), idHorario)
+        .input('id_cancha', sql.Char(10), idCancha)
+        .input('id_dueno', sql.Char(10), idDueno)
+        .query(`
+          INSERT INTO RESERVAS (ID_RESERVA, ID_USER, PRECIO_BASE, Comi_Qr, MONTO_TOTAL, ESTADO, FECHA_CREA, FECHA_CONFIR, ID_SLOTS, ID_HORARIO, ID_CANCHA, ID_DUEÑO)
+          VALUES (@id_reserva, @id_user, @precio_base, @comi_qr, @monto_total, @estado, GETDATE(), GETDATE(), @id_slots, @id_horario, @id_cancha, @id_dueno)
+        `);
+
+      // 2.4 Registrar la boleta en la tabla COMPROBANTES
+      await new sql.Request(transaction)
+        .input('id_comprob', sql.Char(10), idComprobante)
+        .input('nmr_comprob', sql.NVarChar(20), nroComprobante)
+        .input('ruta_pdf', sql.NVarChar(100), '/comprobantes/reserva.pdf')
+        .input('id_reserva', sql.Char(10), idReserva)
+        .input('id_user', sql.Char(10), idUser)
+        .query(`
+          INSERT INTO COMPROBANTES (ID_COMPROB, NMR_COMPROB, RUTA_PDF, FECHA_GENER, ID_RESERVA, ID_USER)
+          VALUES (@id_comprob, @nmr_comprob, @ruta_pdf, CAST(GETDATE() AS DATE), @id_reserva, @id_user)
+        `);
+
+      // 2.5 Actualizar el estado operativo de los bloques en la tabla SLOTS
+      for (const idSlot of slots) {
+        await new sql.Request(transaction)
+          .input('id_slot', sql.Char(10), idSlot)
+          .query("UPDATE SLOTS SET ESTADO = 'RESERVADO' WHERE ID_SLOTS = @id_slot");
+      }
+
+      await transaction.commit();
+      res.status(201).json({ status: 'success', message: '¡Reserva completada con éxito!' });
+
+    } catch (errTrans) {
+      await transaction.rollback();
+      if (errTrans.message === 'SLOT_NO_DISPONIBLE') {
+        return res.status(409).json({ status: 'error', error: 'Uno o más turnos seleccionados acaban de ser ocupados. Refresca para actualizar.' });
+      }
+      throw errTrans;
+    }
+  } catch (error) {
+    console.error('🚨 Error en el flujo de reservas:', error);
+    res.status(500).json({ status: 'error', error: 'Error interno en el servidor de base de datos.' });
+  }
+});
+
+
+
+
+// ==========================================
 // 🌐 PÚBLICO: CATÁLOGO DE CANCHAS
 // ==========================================
 const canchasRoutes = require('./src/routes/canchas.routes')(appPool, poolConnect);
