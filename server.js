@@ -498,13 +498,58 @@ app.use('/api/canchas', canchasRoutes);
 // ==========================================
 // 🖼️ PROXY: IMÁGENES DESDE AZURE BLOB STORAGE
 // ==========================================
-const { streamBlob } = require('./src/config/azure-storage');
+const { streamBlob, toProxyUrl } = require('./src/config/azure-storage');
 app.get('/api/uploads', async (req, res) => {
   const blobName = req.query.blob;
   if (!blobName) return res.status(400).json({ status: 'error', error: 'Parámetro blob requerido' });
   await streamBlob(blobName, res);
 });
+// ==========================================
+// 🏃‍♂️ ENDPOINT: OBTENER RESERVAS DEL JUGADOR
+// ==========================================
+app.get('/api/jugador/reservas', verificarToken, async (req, res) => {
+  const idUser = req.user.id;
+  try {
+    await poolConnect;
+    const result = await appPool.request()
+      .input('id_user', sql.Char(10), idUser)
+      .query(`
+        SELECT 
+          R.ID_Reserva as id,
+          R.Monto_Total as precio,
+          R.Estado as estado,
+          S.Fecha as fechaRaw,
+          CONVERT(VARCHAR(5), S.Hora_Inicio, 108) as inicio,
+          CONVERT(VARCHAR(5), S.Hora_Fin, 108) as fin,
+          C.ID_Cancha as canchaId,
+          C.Nombre as canchaNombre,
+          L.Distrito as distrito,
+          ISNULL((
+            SELECT TOP 1 URL_Foto FROM Fotos_Cancha F WHERE F.ID_Cancha = C.ID_Cancha
+          ), '') as foto,
+          ISNULL(CMP.NMR_COMPROB, 'PENDIENTE') as codigo
+        FROM Reservas R
+        INNER JOIN Slots S ON R.ID_Slots = S.ID_Slots
+        INNER JOIN Canchas C ON R.ID_Cancha = C.ID_Cancha
+        INNER JOIN Local L ON C.ID_Local = L.ID_Local
+        LEFT JOIN COMPROBANTES CMP ON R.ID_RESERVA = CMP.ID_RESERVA
+        WHERE R.ID_User = @id_user
+        ORDER BY S.Fecha DESC, S.Hora_Inicio DESC
+      `);
 
+    // Formateamos las fechas de Azure para el Frontend
+  const datosFormateados = result.recordset.map(r => ({
+  ...r,
+  foto: toProxyUrl(r.foto),
+  fecha: new Date(r.fechaRaw).toISOString().split('T')[0]
+}));
+
+    res.status(200).json({ status: 'success', data: datosFormateados });
+  } catch (error) {
+    console.error('🚨 Error al obtener reservas del jugador:', error);
+    res.status(500).json({ status: 'error', error: 'Fallo al obtener el historial de reservas.' });
+  }
+});
 // ==========================================
 // 🔌 SOCKET.IO — NOTIFICACIONES EN TIEMPO REAL (D-13)
 // ==========================================
