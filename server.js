@@ -28,8 +28,15 @@ if (!process.env.JWT_SECRET || !process.env.REFRESH_TOKEN_SECRET) {
   process.exit(1);
 }
 
-const ORIGINS_ALLOWED = (process.env.CORS_ORIGINS || process.env.FRONTEND_URL || 'http://localhost:5173')
-  .split(',').map(s => s.trim());
+const ORIGINS_ALLOWED = [
+  ...new Set([
+    ...(process.env.CORS_ORIGINS || process.env.FRONTEND_URL || '')
+      .split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean),
+    'https://pichangago-front.vercel.app',
+    'http://localhost:5173',
+    'http://localhost:3000'
+  ])
+];
 const BASE_URL = ORIGINS_ALLOWED[0];
 
 const io = new Server(server, { cors: { origin: ORIGINS_ALLOWED } });
@@ -41,14 +48,18 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  const normalize = s => s.replace(/\/+$/, '');
-  const match = origin && ORIGINS_ALLOWED.some(o => normalize(origin) === normalize(o));
-  if (match) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Vary', 'Origin');
+  if (origin) {
+    console.log(`[CORS] origin=${origin} allowed=${JSON.stringify(ORIGINS_ALLOWED)}`);
+    const match = ORIGINS_ALLOWED.includes(origin);
+    if (match) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Vary', 'Origin');
+    } else {
+      console.log(`[CORS] ORIGIN NOT ALLOWED: ${origin}`);
+    }
   }
   if (req.method === 'OPTIONS') {
     return res.status(204).end();
