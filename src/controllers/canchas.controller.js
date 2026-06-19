@@ -28,10 +28,12 @@ const withFotos = (query) => `
   ), 0) AS TotalReviews
 `;
 
+const safeJsonParse = (str) => { try { return JSON.parse(str); } catch { return []; } };
+
 const parseData = (rows) =>
   rows.map(r => ({
     ...r,
-    Fotos: JSON.parse(r.Fotos).map(f => ({ ...f, URL_Foto: toProxyUrl(f.URL_Foto) }))
+    Fotos: safeJsonParse(r.Fotos).map(f => ({ ...f, URL_Foto: toProxyUrl(f.URL_Foto) }))
   }));
 
 // GET /api/canchas
