@@ -1,20 +1,21 @@
 const sql = require('mssql');
 const path = require('path');
 const { uploadBlob, deleteBlob, toProxyUrl } = require('../config/azure-storage');
+const { generarSlug } = require('../utils/slug');
 
 // ==========================================
 // 🛠️ FUNCIONES AUXILIARES
 // ==========================================
 
-// Auxiliar para obtener el ID_Dueño desde el ID_User del JWT
+// Auxiliar para obtener el ID_DUENO desde el ID_User del JWT
 const obtenerIdDueno = async (idUser, appPool) => {
     const request = new sql.Request(appPool);
     const result = await request
         .input('id_user', sql.Char(10), idUser)
-        .query('SELECT ID_Dueño FROM Dueño WHERE ID_User = @id_user');
+        .query('SELECT ID_DUENO FROM DUENOS WHERE ID_USER = @id_user');
     
     if (result.recordset.length === 0) throw new Error('DUEÑO_NOT_FOUND');
-    return result.recordset[0].ID_Dueño;
+    return result.recordset[0].ID_DUENO;
 };
 
 const CCI_BANK_MAP = { '0002': 'BCP', '0003': 'Interbank', '0011': 'BBVA' };
@@ -24,16 +25,30 @@ const getBankFromCCI = (cci) => {
     return CCI_BANK_MAP[cci.substring(0, 4)] || null;
 };
 
+const obtenerIdTipoCanchaPorCodigo = async (codigo, appPool) => {
+    if (!codigo) return null;
+    const result = await new sql.Request(appPool)
+        .input('codigo', sql.VarChar(10), codigo)
+        .query('SELECT ID_TIPO_CANCHA FROM TIPOS_CANCHA WHERE CODIGO = @codigo');
+    return result.recordset.length > 0 ? result.recordset[0].ID_TIPO_CANCHA : null;
+};
+
 // ==========================================
 // 🏗️ FEATURE 1: MANTENIMIENTO DE CANCHAS
 // ==========================================
 
 // D-01: Registrar Cancha (bajo un Local)
 const registrarCancha = async (req, res, appPool) => {
-    const { nombre, descripcion, precioBase, precioPrime, precioBaja, idLocal } = req.body;
-    
-    if (!nombre || !precioBase || !idLocal) {
-        return res.status(400).json({ status: 'error', error: 'Faltan campos obligatorios (nombre, precioBase, idLocal).' });
+    const { nombre, descripcion, precioBase, precioPrime, precioBaja, idLocal, tipo, tipoDeporte, tipoSuperficie, esTechada, tieneIluminacion } = req.body;
+    const codigoTipo = tipo || tipoDeporte;
+
+    if (!nombre || !precioBase || !idLocal || !codigoTipo) {
+        return res.status(400).json({ status: 'error', error: 'Faltan campos obligatorios: nombre, precioBase, idLocal, tipo.' });
+    }
+
+    const idTipoCancha = await obtenerIdTipoCanchaPorCodigo(codigoTipo, appPool);
+    if (!idTipoCancha) {
+        return res.status(400).json({ status: 'error', error: `El tipo de cancha "${codigoTipo}" no es válido. Usa: F5, F6, F7, F8, F11.` });
     }
 
     try {   
@@ -43,12 +58,32 @@ const registrarCancha = async (req, res, appPool) => {
         const localCheck = await new sql.Request(appPool)
             .input('id_local', sql.Char(10), idLocal)
             .input('id_dueño', sql.Char(10), idDueno)
-            .query('SELECT ID_Local FROM Local WHERE ID_Local = @id_local AND ID_Dueño = @id_dueño');
+            .query('SELECT ID_LOCAL FROM LOCALES WHERE ID_LOCAL = @id_local AND ID_DUENO = @id_dueño');
         if (localCheck.recordset.length === 0) {
             return res.status(403).json({ status: 'error', error: 'Local no encontrado o no te pertenece.' });
         }
 
+        // Validar límite de canchas según suscripción
+        const suscripcion = await new sql.Request(appPool)
+            .input('id_dueño', sql.Char(10), idDueno)
+            .query(`
+                SELECT TOP 1 CANTIDAD_CANCHAS
+                FROM SUSCRIPCIONES
+                WHERE ID_DUENO = @id_dueño AND ESTADO = 'ACTIVO'
+                ORDER BY FECHA_INICIO DESC
+            `);
+        if (suscripcion.recordset.length > 0) {
+            const limite = suscripcion.recordset[0].CANTIDAD_CANCHAS;
+            const canchasCount = await new sql.Request(appPool)
+                .input('id_dueño', sql.Char(10), idDueno)
+                .query(`SELECT COUNT(*) AS total FROM CANCHAS WHERE ID_DUENO = @id_dueño AND ESTADO != 'INACTIVA'`);
+            if (canchasCount.recordset[0].total >= limite) {
+                return res.status(400).json({ status: 'error', error: `Has alcanzado el límite de ${limite} cancha(s) según tu plan.` });
+            }
+        }
+
         const idCancha = `CHN-${Math.floor(100000 + Math.random() * 900000)}`;
+        const slug = generarSlug(nombre, idCancha);
         const pBase = parseFloat(precioBase);
         const pPrime = precioPrime ? parseFloat(precioPrime) : pBase;
         const pBaja = precioBaja ? parseFloat(precioBaja) : pBase;
@@ -59,18 +94,23 @@ const registrarCancha = async (req, res, appPool) => {
         try {
             await new sql.Request(transaction)
                 .input('id_cancha', sql.Char(10), idCancha)
+                .input('slug', sql.VarChar(100), slug)
                 .input('id_dueño', sql.Char(10), idDueno)
                 .input('id_local', sql.Char(10), idLocal)
                 .input('nombre', sql.VarChar(50), nombre)
                 .input('descripcion', sql.VarChar(150), descripcion || '')
+                .input('id_tipo_cancha', sql.Char(10), idTipoCancha)
+                .input('tipo_superficie', sql.VarChar(30), tipoSuperficie || 'GRASS_SINTETICO')
+                .input('es_techada', sql.Bit, esTechada === true || esTechada === 'true')
+                .input('tiene_iluminacion', sql.Bit, tieneIluminacion === false || tieneIluminacion === 'false' ? false : true)
                 .input('precio_base', sql.Decimal(8, 2), pBase)
-                .input('precio_prime', sql.Decimal(8, 2), pPrime)
-                .input('precio_baja', sql.Decimal(8, 2), pBaja)
-                .input('estado', sql.VarChar(20), 'INACTIVO')
+                .input('precio_hora_punta', sql.Decimal(8, 2), pPrime)
+                .input('precio_hora_valle', sql.Decimal(8, 2), pBaja)
+                .input('estado', sql.VarChar(20), 'INACTIVA')
                 .input('fecha_crea', sql.Date, new Date())
                 .query(`
-                    INSERT INTO Canchas (ID_Cancha, ID_Dueño, ID_Local, Nombre, Descripcion, Precio_Base, Precio_Prime, Precio_Baja, Estado, Fecha_Crea)
-                    VALUES (@id_cancha, @id_dueño, @id_local, @nombre, @descripcion, @precio_base, @precio_prime, @precio_baja, @estado, @fecha_crea)
+                    INSERT INTO CANCHAS (ID_CANCHA, ID_LOCAL, ID_DUENO, ID_TIPO_CANCHA, NOMBRE, DESCRIPCION, TIPO_SUPERFICIE, ES_TECHADA, TIENE_ILUMINACION, PRECIO_BASE, PRECIO_HORA_PUNTA, PRECIO_HORA_VALLE, ESTADO, FECHA_CREA, SLUG)
+                    VALUES (@id_cancha, @id_local, @id_dueño, @id_tipo_cancha, @nombre, @descripcion, @tipo_superficie, @es_techada, @tiene_iluminacion, @precio_base, @precio_hora_punta, @precio_hora_valle, @estado, @fecha_crea, @slug)
                 `);
 
             if (req.file) {
@@ -84,13 +124,13 @@ const registrarCancha = async (req, res, appPool) => {
                     .input('id_dueño', sql.Char(10), idDueno)
                     .input('url_foto', sql.VarChar(500), urlFoto)
                     .query(`
-                        INSERT INTO Fotos_Cancha (ID_Foto, ID_Cancha, ID_Dueño, URL_Foto)
-                        VALUES (@id_foto, @id_cancha, @id_dueño, @url_foto)
+                        INSERT INTO FOTOS_CANCHA (ID_FOTO, ID_CANCHA, URL_FOTO)
+                        VALUES (@id_foto, @id_cancha, @url_foto)
                     `);
             }
 
             await transaction.commit();
-            res.status(201).json({ status: 'success', mensaje: 'Cancha registrada en Lima con éxito.', idCancha });
+            res.status(201).json({ status: 'success', mensaje: 'Cancha registrada en Lima con éxito.', idCancha, slug });
         } catch (errTrans) {
             await transaction.rollback();
             throw errTrans;
@@ -107,7 +147,13 @@ const registrarCancha = async (req, res, appPool) => {
 // D-05: Editar Información de la Cancha
 const editarCancha = async (req, res, appPool) => {
     const { idCancha } = req.params;
-    const { nombre, descripcion, precioBase, precioPrime, precioBaja } = req.body;
+    const { nombre, descripcion, precioBase, precioPrime, precioBaja, tipo, tipoDeporte, tipoSuperficie, esTechada, tieneIluminacion } = req.body;
+    const codigoTipo = tipo || tipoDeporte;
+
+    const idTipoCancha = codigoTipo ? await obtenerIdTipoCanchaPorCodigo(codigoTipo, appPool) : null;
+    if (codigoTipo && !idTipoCancha) {
+        return res.status(400).json({ status: 'error', error: `El tipo de cancha "${codigoTipo}" no es válido. Usa: F5, F6, F7, F8, F11.` });
+    }
 
     try {
         const idDueno = await obtenerIdDueno(req.user.id, appPool);
@@ -115,7 +161,7 @@ const editarCancha = async (req, res, appPool) => {
         const verify = await new sql.Request(appPool)
             .input('id_cancha', sql.Char(10), idCancha)
             .input('id_dueño', sql.Char(10), idDueno)
-            .query('SELECT ID_Cancha FROM Canchas WHERE ID_Cancha = @id_cancha AND ID_Dueño = @id_dueño');
+            .query('SELECT ID_CANCHA FROM CANCHAS WHERE ID_CANCHA = @id_cancha AND ID_DUENO = @id_dueño');
 
         if (verify.recordset.length === 0) {
             return res.status(403).json({ status: 'error', error: 'No autorizado para editar esta cancha.' });
@@ -125,19 +171,59 @@ const editarCancha = async (req, res, appPool) => {
         await transaction.begin();
 
         try {
-            await new sql.Request(transaction)
-                .input('id_cancha', sql.Char(10), idCancha)
-                .input('nombre', sql.VarChar(50), nombre)
-                .input('descripcion', sql.VarChar(150), descripcion || '')
-                .input('precio_base', sql.Decimal(8, 2), parseFloat(precioBase))
-                .input('precio_prime', sql.Decimal(8, 2), parseFloat(precioPrime))
-                .input('precio_baja', sql.Decimal(8, 2), parseFloat(precioBaja))
-                .query(`
-                    UPDATE Canchas 
-                    SET Nombre = @nombre, Descripcion = @descripcion,
-                        Precio_Base = @precio_base, Precio_Prime = @precio_prime, Precio_Baja = @precio_baja
-                    WHERE ID_Cancha = @id_cancha
-                `);
+            const slug = generarSlug(nombre, idCancha);
+
+            const setClauses = [];
+            const updateRequest = new sql.Request(transaction);
+            updateRequest.input('id_cancha', sql.Char(10), idCancha);
+
+            if (nombre !== undefined && nombre !== null) {
+                const slug = generarSlug(nombre, idCancha);
+                setClauses.push('NOMBRE = @nombre, SLUG = @slug');
+                updateRequest.input('nombre', sql.VarChar(50), nombre);
+                updateRequest.input('slug', sql.VarChar(100), slug);
+            }
+            if (descripcion !== undefined) {
+                setClauses.push('DESCRIPCION = @descripcion');
+                updateRequest.input('descripcion', sql.VarChar(150), descripcion);
+            }
+            if (idTipoCancha) {
+                setClauses.push('ID_TIPO_CANCHA = @id_tipo_cancha');
+                updateRequest.input('id_tipo_cancha', sql.Char(10), idTipoCancha);
+            }
+            if (tipoSuperficie !== undefined) {
+                setClauses.push('TIPO_SUPERFICIE = @tipo_superficie');
+                updateRequest.input('tipo_superficie', sql.VarChar(30), tipoSuperficie);
+            }
+            if (esTechada !== undefined) {
+                setClauses.push('ES_TECHADA = @es_techada');
+                updateRequest.input('es_techada', sql.Bit, esTechada === true || esTechada === 'true');
+            }
+            if (tieneIluminacion !== undefined) {
+                setClauses.push('TIENE_ILUMINACION = @tiene_iluminacion');
+                updateRequest.input('tiene_iluminacion', sql.Bit, tieneIluminacion === true || tieneIluminacion === 'true');
+            }
+            if (precioBase !== undefined) {
+                setClauses.push('PRECIO_BASE = @precio_base');
+                updateRequest.input('precio_base', sql.Decimal(8, 2), parseFloat(precioBase));
+            }
+            if (precioPrime !== undefined) {
+                setClauses.push('PRECIO_HORA_PUNTA = @precio_hora_punta');
+                updateRequest.input('precio_hora_punta', sql.Decimal(8, 2), parseFloat(precioPrime));
+            }
+            if (precioBaja !== undefined) {
+                setClauses.push('PRECIO_HORA_VALLE = @precio_hora_valle');
+                updateRequest.input('precio_hora_valle', sql.Decimal(8, 2), parseFloat(precioBaja));
+            }
+
+            if (setClauses.length === 0) {
+                return res.status(400).json({ status: 'error', error: 'No hay campos para actualizar.' });
+            }
+
+            await updateRequest.query(`
+                UPDATE CANCHAS SET ${setClauses.join(', ')}
+                WHERE ID_CANCHA = @id_cancha
+            `);
 
             if (req.file) {
                 const ext = path.extname(req.file.originalname);
@@ -149,13 +235,13 @@ const editarCancha = async (req, res, appPool) => {
                         .input('id_foto', sql.Char(10), reemplazarFotoId)
                         .input('id_cancha', sql.Char(10), idCancha)
                         .input('id_dueño', sql.Char(10), idDueno)
-                        .query('SELECT URL_Foto FROM Fotos_Cancha WHERE ID_Foto = @id_foto AND ID_Cancha = @id_cancha AND ID_Dueño = @id_dueño');
+                        .query('SELECT URL_FOTO FROM FOTOS_CANCHA WHERE ID_FOTO = @id_foto AND ID_CANCHA = @id_cancha');
                     if (fotoExistente.recordset.length > 0) {
-                        const oldUrl = fotoExistente.recordset[0].URL_Foto;
+                        const oldUrl = fotoExistente.recordset[0].URL_FOTO;
                         await new sql.Request(transaction)
                             .input('id_foto', sql.Char(10), reemplazarFotoId)
                             .input('url_foto', sql.VarChar(500), urlFoto)
-                            .query('UPDATE Fotos_Cancha SET URL_Foto = @url_foto WHERE ID_Foto = @id_foto');
+                            .query('UPDATE FOTOS_CANCHA SET URL_FOTO = @url_foto WHERE ID_FOTO = @id_foto');
                         await deleteBlob(oldUrl);
                     }
                 } else {
@@ -166,8 +252,8 @@ const editarCancha = async (req, res, appPool) => {
                         .input('id_dueño', sql.Char(10), idDueno)
                         .input('url_foto', sql.VarChar(500), urlFoto)
                         .query(`
-                            INSERT INTO Fotos_Cancha (ID_Foto, ID_Cancha, ID_Dueño, URL_Foto)
-                            VALUES (@id_foto, @id_cancha, @id_dueño, @url_foto)
+                            INSERT INTO FOTOS_CANCHA (ID_FOTO, ID_CANCHA, URL_FOTO)
+                            VALUES (@id_foto, @id_cancha, @url_foto)
                         `);
                 }
             }
@@ -192,21 +278,24 @@ const obtenerMisCanchas = async (req, res, appPool) => {
         const result = await new sql.Request(appPool)
             .input('id_dueño', sql.Char(10), idDueno)
             .query(`
-                SELECT C.ID_Cancha, C.Nombre, C.Descripcion,
-                       C.Precio_Base, C.Precio_Prime, C.Precio_Baja, C.Estado, C.Fecha_Crea,
-                       L.ID_Local, L.Nombre AS LocalNombre, L.Direccion AS LocalDireccion, L.Distrito AS LocalDistrito,
+                SELECT C.ID_CANCHA, C.SLUG, C.NOMBRE, C.DESCRIPCION,
+                       C.TIPO_SUPERFICIE, C.ES_TECHADA, C.TIENE_ILUMINACION,
+                       C.PRECIO_BASE, C.PRECIO_HORA_PUNTA, C.PRECIO_HORA_VALLE, C.ESTADO, C.FECHA_CREA,
+                       TC.CODIGO AS TipoCodigo, TC.NOMBRE AS TipoNombre,
+                       L.ID_LOCAL, L.NOMBRE AS LocalNombre, L.DIRECCION AS LocalDireccion, L.DISTRITO AS LocalDistrito,
                        ISNULL((
-                           SELECT F.ID_Foto, F.URL_Foto
-                           FROM Fotos_Cancha F
-                           WHERE F.ID_Cancha = C.ID_Cancha
+                           SELECT F.ID_FOTO, F.URL_FOTO
+                           FROM FOTOS_CANCHA F
+                           WHERE F.ID_CANCHA = C.ID_CANCHA
                            FOR JSON PATH
                        ), '[]') AS Fotos
-                FROM Canchas C
-                INNER JOIN Local L ON C.ID_Local = L.ID_Local
-                WHERE C.ID_Dueño = @id_dueño
-                ORDER BY C.Fecha_Crea DESC
+                FROM CANCHAS C
+                INNER JOIN LOCALES L ON C.ID_LOCAL = L.ID_LOCAL
+                INNER JOIN TIPOS_CANCHA TC ON C.ID_TIPO_CANCHA = TC.ID_TIPO_CANCHA
+                WHERE C.ID_DUENO = @id_dueño
+                ORDER BY C.FECHA_CREA DESC
             `);
-        const data = result.recordset.map(c => ({ ...c, Fotos: JSON.parse(c.Fotos).map(f => ({ ...f, URL_Foto: toProxyUrl(f.URL_Foto) })) }));
+        const data = result.recordset.map(c => ({ ...c, Fotos: JSON.parse(c.Fotos).map(f => ({ ...f, URL_FOTO: toProxyUrl(f.URL_FOTO) })) }));
         res.status(200).json({ status: 'success', data });
     } catch (error) {
         if (error.message === 'DUEÑO_NOT_FOUND') return res.status(404).json({ status: 'error', error: 'Perfil de dueño no encontrado.' });
@@ -225,24 +314,27 @@ const obtenerCanchaPorId = async (req, res, appPool) => {
             .input('id_cancha', sql.Char(10), idCancha)
             .input('id_dueño', sql.Char(10), idDueno)
             .query(`
-                SELECT C.ID_Cancha, C.Nombre, C.Descripcion,
-                       C.Precio_Base, C.Precio_Prime, C.Precio_Baja, C.Estado, C.Fecha_Crea,
-                       L.ID_Local, L.Nombre AS LocalNombre, L.Direccion, L.Distrito, L.Referencia,
+                SELECT C.ID_CANCHA, C.SLUG, C.NOMBRE, C.DESCRIPCION,
+                       C.TIPO_SUPERFICIE, C.ES_TECHADA, C.TIENE_ILUMINACION,
+                       C.PRECIO_BASE, C.PRECIO_HORA_PUNTA, C.PRECIO_HORA_VALLE, C.ESTADO, C.FECHA_CREA,
+                       TC.CODIGO AS TipoCodigo, TC.NOMBRE AS TipoNombre,
+                       L.ID_LOCAL, L.NOMBRE AS LocalNombre, L.DIRECCION, L.DISTRITO, L.REFERENCIA,
                        ISNULL((
-                           SELECT F.ID_Foto, F.URL_Foto, F.Fecha_Sub
-                           FROM Fotos_Cancha F
-                           WHERE F.ID_Cancha = C.ID_Cancha
+                           SELECT F.ID_FOTO, F.URL_FOTO, F.FECHA_SUBIDA
+                           FROM FOTOS_CANCHA F
+                           WHERE F.ID_CANCHA = C.ID_CANCHA
                            FOR JSON PATH
                        ), '[]') AS Fotos
-                FROM Canchas C
-                INNER JOIN Local L ON C.ID_Local = L.ID_Local
-                WHERE C.ID_Cancha = @id_cancha AND C.ID_Dueño = @id_dueño
+                FROM CANCHAS C
+                INNER JOIN LOCALES L ON C.ID_LOCAL = L.ID_LOCAL
+                INNER JOIN TIPOS_CANCHA TC ON C.ID_TIPO_CANCHA = TC.ID_TIPO_CANCHA
+                WHERE C.ID_CANCHA = @id_cancha AND C.ID_DUENO = @id_dueño
             `);
         if (result.recordset.length === 0) {
             return res.status(404).json({ status: 'error', error: 'Cancha no encontrada.' });
         }
         const cancha = result.recordset[0];
-        cancha.Fotos = JSON.parse(cancha.Fotos).map(f => ({ ...f, URL_Foto: toProxyUrl(f.URL_Foto) }));
+        cancha.Fotos = JSON.parse(cancha.Fotos).map(f => ({ ...f, URL_FOTO: toProxyUrl(f.URL_FOTO) }));
         res.status(200).json({ status: 'success', data: cancha });
     } catch (error) {
         if (error.message === 'DUEÑO_NOT_FOUND') return res.status(404).json({ status: 'error', error: 'Perfil de dueño no encontrado.' });
@@ -262,7 +354,7 @@ const obtenerReviewsCancha = async (req, res, appPool) => {
         const verify = await new sql.Request(appPool)
             .input('id_cancha', sql.Char(10), idCancha)
             .input('id_dueño', sql.Char(10), idDueno)
-            .query('SELECT ID_Cancha FROM Canchas WHERE ID_Cancha = @id_cancha AND ID_Dueño = @id_dueño');
+            .query('SELECT ID_CANCHA FROM CANCHAS WHERE ID_CANCHA = @id_cancha AND ID_DUENO = @id_dueño');
 
         if (verify.recordset.length === 0) {
             return res.status(403).json({ status: 'error', error: 'No tienes permisos sobre esta cancha.' });
@@ -271,17 +363,17 @@ const obtenerReviewsCancha = async (req, res, appPool) => {
         const result = await new sql.Request(appPool)
             .input('id_cancha', sql.Char(10), idCancha)
             .query(`
-                SELECT R.ID_Review, R.Calificacion, R.Comentarios, R.Fecha_Crea,
-                       U.Nombre AS JugadorNombre, U.APELLIDO AS JugadorApellido
-                FROM Reviews R
-                INNER JOIN Usuario U ON R.ID_User = U.ID_USER
-                WHERE R.ID_Cancha = @id_cancha
-                ORDER BY R.Fecha_Crea DESC
+                SELECT R.ID_REVIEW, R.CALIFICACION, R.COMENTARIOS, R.FECHA_CREA,
+                       U.NOMBRE AS JugadorNombre, U.APELLIDO AS JugadorApellido
+                FROM REVIEWS R
+                INNER JOIN USUARIOS U ON R.ID_USER = U.ID_USER
+                WHERE R.ID_CANCHA = @id_cancha
+                ORDER BY R.FECHA_CREA DESC
             `);
 
         const totalReviews = result.recordset.length;
         const promedio = totalReviews > 0
-            ? result.recordset.reduce((s, r) => s + r.Calificacion, 0) / totalReviews
+            ? result.recordset.reduce((s, r) => s + r.CALIFICACION, 0) / totalReviews
             : 0;
 
         res.status(200).json({
@@ -305,7 +397,7 @@ const obtenerReviewsCancha = async (req, res, appPool) => {
 
 // Registrar un nuevo local
 const registrarLocal = async (req, res, appPool) => {
-    const { nombre, direccion, distrito, referencia } = req.body;
+    const { nombre, direccion, distrito, referencia, departamento, provincia, latitud, longitud } = req.body;
     if (!nombre || !direccion || !distrito) {
         return res.status(400).json({ status: 'error', error: 'Faltan campos obligatorios (nombre, direccion, distrito).' });
     }
@@ -317,13 +409,18 @@ const registrarLocal = async (req, res, appPool) => {
             .input('id_dueño', sql.Char(10), idDueno)
             .input('nombre', sql.VarChar(100), nombre)
             .input('direccion', sql.VarChar(150), direccion)
+            .input('pais', sql.VarChar(50), 'PERU')
+            .input('departamento', sql.VarChar(50), departamento || 'Lima')
+            .input('provincia', sql.VarChar(50), provincia || 'Lima')
             .input('distrito', sql.VarChar(50), distrito)
             .input('referencia', sql.VarChar(200), referencia || null)
+            .input('latitud', sql.Decimal(10, 7), latitud || null)
+            .input('longitud', sql.Decimal(10, 7), longitud || null)
             .input('estado', sql.VarChar(20), 'ACTIVO')
             .input('fecha_crea', sql.DateTime, new Date())
             .query(`
-                INSERT INTO Local (ID_Local, ID_Dueño, Nombre, Direccion, Distrito, Referencia, Estado, Fecha_Crea)
-                VALUES (@id_local, @id_dueño, @nombre, @direccion, @distrito, @referencia, @estado, @fecha_crea)
+                INSERT INTO LOCALES (ID_LOCAL, ID_DUENO, NOMBRE, DIRECCION, PAIS, DEPARTAMENTO, PROVINCIA, DISTRITO, REFERENCIA, LATITUD, LONGITUD, ESTADO, FECHA_CREA)
+                VALUES (@id_local, @id_dueño, @nombre, @direccion, @pais, @departamento, @provincia, @distrito, @referencia, @latitud, @longitud, @estado, @fecha_crea)
             `);
         res.status(201).json({ status: 'success', mensaje: 'Local registrado con éxito.', idLocal });
     } catch (error) {
@@ -336,13 +433,13 @@ const registrarLocal = async (req, res, appPool) => {
 // Editar datos del local
 const editarLocal = async (req, res, appPool) => {
     const { idLocal } = req.params;
-    const { nombre, direccion, distrito, referencia } = req.body;
+    const { nombre, direccion, departamento, provincia, distrito, referencia, pais, latitud, longitud } = req.body;
     try {
         const idDueno = await obtenerIdDueno(req.user.id, appPool);
         const verify = await new sql.Request(appPool)
             .input('id_local', sql.Char(10), idLocal)
             .input('id_dueño', sql.Char(10), idDueno)
-            .query('SELECT ID_Local FROM Local WHERE ID_Local = @id_local AND ID_Dueño = @id_dueño');
+            .query('SELECT ID_LOCAL FROM LOCALES WHERE ID_LOCAL = @id_local AND ID_DUENO = @id_dueño');
         if (verify.recordset.length === 0) {
             return res.status(403).json({ status: 'error', error: 'Local no encontrado o no te pertenece.' });
         }
@@ -350,11 +447,16 @@ const editarLocal = async (req, res, appPool) => {
             .input('id_local', sql.Char(10), idLocal)
             .input('nombre', sql.VarChar(100), nombre)
             .input('direccion', sql.VarChar(150), direccion)
+            .input('pais', sql.VarChar(50), pais || 'PERU')
+            .input('departamento', sql.VarChar(50), departamento || 'Lima')
+            .input('provincia', sql.VarChar(50), provincia || 'Lima')
             .input('distrito', sql.VarChar(50), distrito)
             .input('referencia', sql.VarChar(200), referencia || null)
+            .input('latitud', sql.Decimal(10, 7), latitud || null)
+            .input('longitud', sql.Decimal(10, 7), longitud || null)
             .query(`
-                UPDATE Local SET Nombre = @nombre, Direccion = @direccion, Distrito = @distrito, Referencia = @referencia
-                WHERE ID_Local = @id_local
+                UPDATE LOCALES SET NOMBRE = @nombre, DIRECCION = @direccion, PAIS = @pais, DEPARTAMENTO = @departamento, PROVINCIA = @provincia, DISTRITO = @distrito, REFERENCIA = @referencia, LATITUD = @latitud, LONGITUD = @longitud
+                WHERE ID_LOCAL = @id_local
             `);
         res.status(200).json({ status: 'success', mensaje: 'Local actualizado con éxito.' });
     } catch (error) {
@@ -372,16 +474,16 @@ const obtenerMisLocales = async (req, res, appPool) => {
         const result = await new sql.Request(appPool)
             .input('id_dueño', sql.Char(10), idDueno)
             .query(`
-                SELECT L.ID_Local, L.Nombre, L.Direccion, L.Distrito, L.Referencia, L.Estado, L.Fecha_Crea,
+                SELECT L.ID_LOCAL, L.NOMBRE, L.DIRECCION, L.DISTRITO, L.REFERENCIA, L.PAIS, L.DEPARTAMENTO, L.PROVINCIA, L.LATITUD, L.LONGITUD, L.ESTADO, L.FECHA_CREA,
                        ISNULL((
-                           SELECT C.ID_Cancha, C.Nombre AS CanchaNombre, C.Descripcion, C.Precio_Base, C.Precio_Prime, C.Precio_Baja, C.Estado AS CanchaEstado
-                           FROM Canchas C
-                           WHERE C.ID_Local = L.ID_Local
-                           FOR JSON PATH
+                           SELECT C.ID_CANCHA, C.SLUG, C.NOMBRE AS CanchaNombre, C.DESCRIPCION, C.PRECIO_BASE, C.PRECIO_HORA_PUNTA, C.PRECIO_HORA_VALLE, C.ESTADO AS CanchaEstado, C.TIPO_SUPERFICIE, C.ES_TECHADA, C.TIENE_ILUMINACION
+                            FROM CANCHAS C
+                            WHERE C.ID_LOCAL = L.ID_LOCAL
+                            FOR JSON PATH
                        ), '[]') AS Canchas
-                FROM Local L
-                WHERE L.ID_Dueño = @id_dueño
-                ORDER BY L.Fecha_Crea DESC
+                FROM LOCALES L
+                WHERE L.ID_DUENO = @id_dueño
+                ORDER BY L.FECHA_CREA DESC
             `);
         const data = result.recordset.map(l => ({ ...l, Canchas: JSON.parse(l.Canchas) }));
         res.status(200).json({ status: 'success', data });
@@ -402,15 +504,15 @@ const obtenerLocalPorId = async (req, res, appPool) => {
             .input('id_local', sql.Char(10), idLocal)
             .input('id_dueño', sql.Char(10), idDueno)
             .query(`
-                SELECT L.ID_Local, L.Nombre, L.Direccion, L.Distrito, L.Referencia, L.Estado, L.Fecha_Crea,
+                SELECT L.ID_LOCAL, L.NOMBRE, L.DIRECCION, L.DISTRITO, L.REFERENCIA, L.PAIS, L.DEPARTAMENTO, L.PROVINCIA, L.LATITUD, L.LONGITUD, L.ESTADO, L.FECHA_CREA,
                        ISNULL((
-                           SELECT C.ID_Cancha, C.Nombre AS CanchaNombre, C.Descripcion, C.Precio_Base, C.Precio_Prime, C.Precio_Baja, C.Estado AS CanchaEstado
-                           FROM Canchas C
-                           WHERE C.ID_Local = L.ID_Local
-                           FOR JSON PATH
+                           SELECT C.ID_CANCHA, C.SLUG, C.NOMBRE AS CanchaNombre, C.DESCRIPCION, C.PRECIO_BASE, C.PRECIO_HORA_PUNTA, C.PRECIO_HORA_VALLE, C.ESTADO AS CanchaEstado, C.TIPO_SUPERFICIE, C.ES_TECHADA, C.TIENE_ILUMINACION
+                            FROM CANCHAS C
+                            WHERE C.ID_LOCAL = L.ID_LOCAL
+                            FOR JSON PATH
                        ), '[]') AS Canchas
-                FROM Local L
-                WHERE L.ID_Local = @id_local AND L.ID_Dueño = @id_dueño
+                FROM LOCALES L
+                WHERE L.ID_LOCAL = @id_local AND L.ID_DUENO = @id_dueño
             `);
         if (result.recordset.length === 0) {
             return res.status(404).json({ status: 'error', error: 'Local no encontrado.' });
@@ -434,17 +536,17 @@ const eliminarFoto = async (req, res, appPool) => {
         const foto = await new sql.Request(appPool)
             .input('id_foto', sql.Char(10), idFoto)
             .input('id_dueño', sql.Char(10), idDueno)
-            .query('SELECT URL_Foto FROM Fotos_Cancha WHERE ID_Foto = @id_foto AND ID_Dueño = @id_dueño');
+            .query('SELECT URL_FOTO FROM FOTOS_CANCHA WHERE ID_FOTO = @id_foto');
 
         if (foto.recordset.length === 0) {
             return res.status(404).json({ status: 'error', error: 'Foto no encontrada.' });
         }
 
-        const urlFoto = foto.recordset[0].URL_Foto;
+        const urlFoto = foto.recordset[0].URL_FOTO;
 
         await new sql.Request(appPool)
             .input('id_foto', sql.Char(10), idFoto)
-            .query('DELETE FROM Fotos_Cancha WHERE ID_Foto = @id_foto');
+            .query('DELETE FROM FOTOS_CANCHA WHERE ID_FOTO = @id_foto');
 
         await deleteBlob(urlFoto);
 
@@ -461,8 +563,8 @@ const cambiarEstadoCancha = async (req, res, appPool) => {
     const { idCancha } = req.params;
     const { estado } = req.body; 
 
-    if (!['DISPONIBLE', 'SUSPENDIDO'].includes(estado)) {
-        return res.status(400).json({ status: 'error', error: 'Estado no válido.' });
+    if (!['DISPONIBLE', 'MANTENIMIENTO', 'INACTIVA'].includes(estado)) {
+        return res.status(400).json({ status: 'error', error: 'Estado no válido. Usa: DISPONIBLE, MANTENIMIENTO o INACTIVA.' });
     }
 
     try {
@@ -472,7 +574,7 @@ const cambiarEstadoCancha = async (req, res, appPool) => {
             .input('id_cancha', sql.Char(10), idCancha)
             .input('id_dueño', sql.Char(10), idDueno)
             .input('estado', sql.VarChar(20), estado)
-            .query('UPDATE Canchas SET Estado = @estado WHERE ID_Cancha = @id_cancha AND ID_Dueño = @id_dueño');
+            .query('UPDATE CANCHAS SET ESTADO = @estado WHERE ID_CANCHA = @id_cancha AND ID_DUENO = @id_dueño');
 
         if (result.rowsAffected[0] === 0) {
             return res.status(404).json({ status: 'error', error: 'Cancha no encontrada o no pertenece al dueño.' });
@@ -499,9 +601,9 @@ const obtenerPerfil = async (req, res, appPool) => {
             .query(`
                 SELECT
                     U.ID_USER, U.NOMBRE AS Nombre, U.APELLIDO AS Apellido, U.EMAIL AS Correo, U.TELEFONO AS Telefono, U.ROL AS Rol, U.ESTADO AS Estado,
-                    D.ID_DUEÑO AS ID_Dueño, D.RUC AS Ruc, D.RAZON_SOCIAL AS Razon_Social, D.CCI AS Cci, D.BANCO AS Banco, D.ESTADO AS EstadoDueño, D.FECHA_AFILIACION AS Fecha_Afiliacion
-                FROM Usuario U
-                LEFT JOIN Dueño D ON U.ID_USER = D.ID_USER
+                    D.ID_DUENO, D.RUC, D.RAZON_SOCIAL, D.CCI, D.BANCO, D.ESTADO AS EstadoDueno, D.FECHA_AFILIACION
+                FROM USUARIOS U
+                LEFT JOIN DUENOS D ON U.ID_USER = D.ID_USER
                 WHERE U.ID_USER = @id_user
             `);
         if (result.recordset.length === 0) {
@@ -541,7 +643,7 @@ const actualizarPerfil = async (req, res, appPool) => {
         }
 
         const result = await request.query(`
-            UPDATE Usuario SET ${updates.join(', ')}
+            UPDATE USUARIOS SET ${updates.join(', ')}
             WHERE ID_USER = @id_user
         `);
 
@@ -561,7 +663,7 @@ const obtenerPerfilFinanciero = async (req, res, appPool) => {
     try {
         const result = await new sql.Request(appPool)
             .input('id_user', sql.Char(10), idUser)
-            .query('SELECT ID_Dueño, Ruc, Razon_Social, CCI, Banco, Estado, Fecha_Afiliacion FROM Dueño WHERE ID_User = @id_user');
+            .query('SELECT ID_DUENO, RUC, RAZON_SOCIAL, CCI, BANCO, ESTADO, FECHA_AFILIACION FROM DUENOS WHERE ID_USER = @id_user');
         if (result.recordset.length === 0) {
             return res.status(404).json({ status: 'error', error: 'Perfil de dueño no encontrado.' });
         }
@@ -611,9 +713,9 @@ const actualizarPerfilFinanciero = async (req, res, appPool) => {
             .input('cci', sql.VarChar(50), cci)
             .input('banco', sql.VarChar(50), bancoFinal)
             .query(`
-                UPDATE Dueño 
-                SET Ruc = @ruc, Razon_Social = @razon_social, CCI = @cci, Banco = @banco
-                WHERE ID_User = @id_user
+                UPDATE DUENOS 
+                SET RUC = @ruc, RAZON_SOCIAL = @razon_social, CCI = @cci, BANCO = @banco
+                WHERE ID_USER = @id_user
             `);
 
         if (result.rowsAffected[0] === 0) {
@@ -648,7 +750,7 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
         const verifyCancha = await new sql.Request(appPool)
             .input('id_cancha', sql.Char(10), idCancha)
             .input('id_dueño', sql.Char(10), idDueno)
-            .query('SELECT ID_Cancha FROM Canchas WHERE ID_Cancha = @id_cancha AND ID_Dueño = @id_dueño');
+            .query('SELECT ID_CANCHA FROM CANCHAS WHERE ID_CANCHA = @id_cancha AND ID_DUENO = @id_dueño');
 
         if (verifyCancha.recordset.length === 0) {
             return res.status(403).json({ status: 'error', error: 'No tienes permisos sobre esta cancha.' });
@@ -663,16 +765,16 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
             await new sql.Request(transaction)
                 .input('id_cancha', sql.Char(10), idCancha)
                 .query(`
-                    DELETE FROM Slots
-                    WHERE ID_Horario IN (SELECT ID_Horario FROM Horarios WHERE ID_Cancha = @id_cancha)
-                      AND Estado NOT IN ('RESERVADO', 'NO_ASISTIO')
+                    DELETE FROM SLOTS
+                    WHERE ID_HORARIO IN (SELECT ID_HORARIO FROM HORARIOS WHERE ID_CANCHA = @id_cancha)
+                      AND ESTADO NOT IN ('RESERVADO', 'NO_ASISTIO')
                 `);
             await new sql.Request(transaction)
                 .input('id_cancha', sql.Char(10), idCancha)
                 .query(`
-                    DELETE FROM Horarios
-                    WHERE ID_Cancha = @id_cancha
-                      AND ID_Horario NOT IN (SELECT DISTINCT ID_Horario FROM Slots)
+                    DELETE FROM HORARIOS
+                    WHERE ID_CANCHA = @id_cancha
+                      AND ID_HORARIO NOT IN (SELECT DISTINCT ID_HORARIO FROM SLOTS)
                 `);
 
             for (const item of horarios) {
@@ -683,13 +785,13 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
                     .input('id_cancha', sql.Char(10), idCancha)
                     .input('id_dueño', sql.Char(10), idDueno)
                     .input('dia_semana', sql.Int, item.diaSemana) 
-                    .input('fecha_inicio', sql.DateTime, new Date(`2025-01-01T${item.horaInicio}:00`))
-                    .input('fecha_fin', sql.DateTime, new Date(`2025-01-01T${item.horaFin}:00`))
-                    .input('tipo_precio', sql.VarChar(20), item.tipoPrecio.toUpperCase()) 
+                    .input('hora_inicio', sql.VarChar(5), item.horaInicio)
+                    .input('hora_fin', sql.VarChar(5), item.horaFin)
+                    .input('tipo_precio', sql.VarChar(20), mapTipoPrecioToDB(item.tipoPrecio)) 
                     .input('estado', sql.VarChar(20), 'ACTIVO')
                     .query(`
-                        INSERT INTO Horarios (ID_Horario, ID_Cancha, ID_Dueño, Dia_Semana, Fecha_Inicio, Fecha_Fin, Tipo_Precio, Estado)
-                        VALUES (@id_horario, @id_cancha, @id_dueño, @dia_semana, @fecha_inicio, @fecha_fin, @tipo_precio, @estado)
+                        INSERT INTO HORARIOS (ID_HORARIO, ID_CANCHA, ID_DUENO, DIA_SEMANA, HORA_INICIO, HORA_FIN, TIPO_PRECIO, ESTADO)
+                        VALUES (@id_horario, @id_cancha, @id_dueño, @dia_semana, @hora_inicio, @hora_fin, @tipo_precio, @estado)
                     `);
             }
 
@@ -698,7 +800,7 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
                 .input('id_dueño', sql.Char(10), idDueno)
                 .query(`
                     DECLARE @contSlot INT;
-                    SELECT @contSlot = ISNULL(MAX(CONVERT(INT, RIGHT(ID_SLOTS, 6))), 0) FROM Slots;
+                    SELECT @contSlot = ISNULL(MAX(CONVERT(INT, RIGHT(ID_SLOT, 6))), 0) FROM SLOTS;
 
                     WITH fechas AS (
                         SELECT CAST(GETDATE() AS DATE) AS fecha
@@ -707,28 +809,34 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
                         FROM fechas
                         WHERE fecha < DATEADD(DAY, 365, CAST(GETDATE() AS DATE))
                     )
-                    INSERT INTO Slots (ID_SLOTS, ID_HORARIO, ID_CANCHA, ID_DUEÑO, FECHA, Hora_Inicio, Hora_Fin, ESTADO)
+                    INSERT INTO SLOTS (ID_SLOT, ID_HORARIO, ID_CANCHA, ID_DUENO, FECHA, HORA_INICIO, HORA_FIN, PRECIO_FINAL, ESTADO)
                     SELECT
-                        'SLT-' + RIGHT('000000' + CAST(@contSlot + ROW_NUMBER() OVER (ORDER BY h.ID_HORARIO, f.fecha) AS VARCHAR(6)), 6),
-                        h.ID_HORARIO, h.ID_CANCHA, h.ID_DUEÑO,
+                        'SLT-' + RIGHT('000000' + CAST(@contSlot + ROW_NUMBER() OVER (ORDER BY h.ID_HORARIO, f.fecha) AS VARCHAR(10)), 6),
+                        h.ID_HORARIO, h.ID_CANCHA, h.ID_DUENO,
                         f.fecha,
-                        CAST(h.FECHA_INICIO AS TIME),
-                        CAST(h.FECHA_FIN AS TIME),
+                        h.HORA_INICIO,
+                        h.HORA_FIN,
+                        CASE h.TIPO_PRECIO
+                            WHEN 'PUNTA' THEN c.PRECIO_HORA_PUNTA
+                            WHEN 'VALLE' THEN c.PRECIO_HORA_VALLE
+                            ELSE c.PRECIO_BASE
+                        END,
                         'DISPONIBLE'
-                    FROM Horarios h
+                    FROM HORARIOS h
+                    INNER JOIN CANCHAS c ON h.ID_CANCHA = c.ID_CANCHA
                     CROSS JOIN fechas f
-                    WHERE h.ID_Cancha = @id_cancha
+                    WHERE h.ID_CANCHA = @id_cancha
                       AND (DATEPART(WEEKDAY, f.fecha) + @@DATEFIRST - 1) % 7 = h.DIA_SEMANA
                       AND NOT EXISTS (
-                          SELECT 1 FROM Slots s
-                          WHERE s.ID_Cancha = @id_cancha
+                          SELECT 1 FROM SLOTS s
+                          WHERE s.ID_CANCHA = @id_cancha
                             AND s.FECHA = f.fecha
-                            AND s.Hora_Inicio = CAST(h.FECHA_INICIO AS TIME)
-                            AND s.Estado IN ('RESERVADO', 'NO_ASISTIO')
+                            AND s.HORA_INICIO = h.HORA_INICIO
+                            AND s.ESTADO IN ('RESERVADO', 'NO_ASISTIO')
                       )
                     OPTION (MAXRECURSION 365);
 
-                    UPDATE Canchas SET Estado = 'DISPONIBLE' WHERE ID_Cancha = @id_cancha AND ID_Dueño = @id_dueño;
+                    UPDATE CANCHAS SET ESTADO = 'DISPONIBLE' WHERE ID_CANCHA = @id_cancha AND ID_DUENO = @id_dueño;
                 `);
 
             await transaction.commit();
@@ -755,12 +863,13 @@ const obtenerHorariosCancha = async (req, res, appPool) => {
             .input('id_cancha', sql.Char(10), idCancha)
             .input('id_dueño', sql.Char(10), idDueno)
             .query(`
-                SELECT ID_Horario, Dia_Semana, Fecha_Inicio, Fecha_Fin, Tipo_Precio, Estado
-                FROM Horarios
-                WHERE ID_Cancha = @id_cancha AND ID_Dueño = @id_dueño
-                ORDER BY Dia_Semana ASC, Fecha_Inicio ASC
+                SELECT ID_HORARIO, DIA_SEMANA, HORA_INICIO, HORA_FIN, TIPO_PRECIO, ESTADO
+                FROM HORARIOS
+                WHERE ID_CANCHA = @id_cancha AND ID_DUENO = @id_dueño
+                ORDER BY DIA_SEMANA ASC, HORA_INICIO ASC
             `);
-        res.status(200).json({ status: 'success', data: result.recordset });
+        const data = result.recordset.map(r => ({ ...r, TIPO_PRECIO: mapTipoPrecioFromDB(r.TIPO_PRECIO) }));
+        res.status(200).json({ status: 'success', data });
     } catch (error) {
         if (error.message === 'DUEÑO_NOT_FOUND') return res.status(404).json({ status: 'error', error: 'Perfil de dueño no encontrado.' });
         console.error('🚨 Error en obtenerHorariosCancha:', error);
@@ -787,21 +896,25 @@ const obtenerAgendaDiaria = async (req, res, appPool) => {
             .input('fecha', sql.Date, fechaFiltro)
             .query(`
                 SELECT 
-                    S.ID_Slots, S.Fecha, S.Estado AS EstadoSlot,
-                    C.ID_Cancha, C.Nombre AS CanchaNombre,
-                    H.Fecha_Inicio, H.Fecha_Fin, H.Tipo_Precio,
-                    R.ID_Reserva, R.Monto_Total, R.Estado AS EstadoReserva,
-                    U.Nombre AS JugadorNombre, U.TELEFONO AS JugadorTelefono
-                FROM Slots S
-                INNER JOIN Canchas C ON S.ID_Cancha = C.ID_Cancha
-                INNER JOIN Horarios H ON S.ID_Horario = H.ID_Horario
-                LEFT JOIN Reservas R ON S.ID_Slots = R.ID_Slots
-                LEFT JOIN Usuario U ON R.ID_User = U.ID_USER
-                WHERE S.ID_Dueño = @id_dueño AND S.Fecha = @fecha
-                ORDER BY C.Nombre ASC, H.Fecha_Inicio ASC
+                    S.ID_SLOT, S.FECHA, S.ESTADO AS EstadoSlot,
+                    C.ID_CANCHA, C.NOMBRE AS CanchaNombre,
+                    ISNULL((
+                        SELECT TOP 1 URL_FOTO FROM FOTOS_CANCHA F WHERE F.ID_CANCHA = C.ID_CANCHA
+                    ), '') AS Foto,
+                    H.HORA_INICIO, H.HORA_FIN, H.TIPO_PRECIO,
+                    R.ID_RESERVA, R.MONTO_TOTAL, R.ESTADO AS EstadoReserva,
+                    U.NOMBRE AS JugadorNombre, U.TELEFONO AS JugadorTelefono
+                FROM SLOTS S
+                INNER JOIN CANCHAS C ON S.ID_CANCHA = C.ID_CANCHA
+                INNER JOIN HORARIOS H ON S.ID_HORARIO = H.ID_HORARIO
+                LEFT JOIN RESERVAS R ON S.ID_SLOT = R.ID_SLOT
+                LEFT JOIN USUARIOS U ON R.ID_USER = U.ID_USER
+                WHERE S.ID_DUENO = @id_dueño AND S.FECHA = @fecha
+                ORDER BY C.NOMBRE ASC, H.HORA_INICIO ASC
             `);
 
-        res.status(200).json({ status: 'success', data: result.recordset });
+        const data = result.recordset.map(r => ({ ...r, Foto: toProxyUrl(r.Foto), TIPO_PRECIO: mapTipoPrecioFromDB(r.TIPO_PRECIO) }));
+        res.status(200).json({ status: 'success', data });
     } catch (error) {
         console.error('🚨 Error en obtenerAgendaDiaria:', error);
         res.status(500).json({ status: 'error', error: 'Error interno al recopilar la agenda diaria.' });
@@ -819,24 +932,26 @@ const obtenerDetalleReserva = async (req, res, appPool) => {
             .input('id_dueño', sql.Char(10), idDueno)
             .query(`
                 SELECT
-                    R.ID_Reserva, R.Precio_Base, R.Comi_Qr, R.Monto_Total,
-                    R.Estado AS EstadoReserva, R.Fecha_Crea, R.Fecha_Confir, R.Fecha_Cancel,
-                    R.Zona_Cancela, R.Porcen_Reemb,
-                    U.ID_USER, U.Nombre AS JugadorNombre, U.APELLIDO AS JugadorApellido,
+                    R.ID_RESERVA, R.PRECIO_BASE, R.COMISION_QR, R.MONTO_TOTAL,
+                    R.ESTADO AS EstadoReserva, R.FECHA_CREA, R.FECHA_CONFIRMADA, R.FECHA_CANCELADA,
+                    R.CANCELADO_POR, R.PORCENTAJE_REEMB,
+                    U.ID_USER, U.NOMBRE AS JugadorNombre, U.APELLIDO AS JugadorApellido,
                     U.TELEFONO AS JugadorTelefono, U.EMAIL AS JugadorEmail,
-                    S.Fecha AS FechaSlot,
-                    CONVERT(VARCHAR(5), S.Hora_Inicio, 108) AS Hora_Inicio,
-                    CONVERT(VARCHAR(5), S.Hora_Fin, 108) AS Hora_Fin,
-                    C.ID_Cancha, C.Nombre AS CanchaNombre, L.Direccion, L.Distrito,
-                    P.ID_Pago, P.Monto AS MontoPagado, P.Estado AS EstadoPago,
-                    P.Fecha_Proces, P.Culqi_Response
-                FROM Reservas R
-                INNER JOIN Usuario U ON R.ID_User = U.ID_USER
-                INNER JOIN Slots S ON R.ID_Slots = S.ID_Slots
-                INNER JOIN Canchas C ON R.ID_Cancha = C.ID_Cancha
-                INNER JOIN Local L ON C.ID_Local = L.ID_Local
-                LEFT JOIN Pagos P ON R.ID_Reserva = P.ID_Reserva
-                WHERE R.ID_Reserva = @id_reserva AND R.ID_Dueño = @id_dueño
+                    S.FECHA AS FechaSlot,
+                    CONVERT(VARCHAR(5), S.HORA_INICIO, 108) AS Hora_Inicio,
+                    CONVERT(VARCHAR(5), S.HORA_FIN, 108) AS Hora_Fin,
+                    C.ID_CANCHA, C.NOMBRE AS CanchaNombre, L.DIRECCION, L.DISTRITO,
+                    P.ID_PAGO, P.MONTO AS MontoPagado, P.ESTADO AS EstadoPago,
+                    P.FECHA_PROCESO, P.RESPUESTA_PROVEEDOR,
+                    CMP.RUTA_PDF AS ComprobanteURL, CMP.NRO_COMPROBANTE AS ComprobanteCodigo
+                FROM RESERVAS R
+                INNER JOIN USUARIOS U ON R.ID_USER = U.ID_USER
+                INNER JOIN SLOTS S ON R.ID_SLOT = S.ID_SLOT
+                INNER JOIN CANCHAS C ON R.ID_CANCHA = C.ID_CANCHA
+                INNER JOIN LOCALES L ON C.ID_LOCAL = L.ID_LOCAL
+                LEFT JOIN PAGOS P ON R.ID_RESERVA = P.ID_RESERVA
+                LEFT JOIN COMPROBANTES CMP ON R.ID_RESERVA = CMP.ID_RESERVA
+                WHERE R.ID_RESERVA = @id_reserva AND R.ID_DUENO = @id_dueño
             `);
         if (result.recordset.length === 0) {
             return res.status(404).json({ status: 'error', error: 'Reserva no encontrada.' });
@@ -865,36 +980,36 @@ const obtenerCalendarioSemanal = async (req, res, appPool) => {
             .input('fecha_fin', sql.Date, fechaFin)
             .query(`
                 SELECT
-                    S.ID_Slots, S.Fecha, S.Estado AS EstadoSlot,
-                    CONVERT(VARCHAR(5), S.Hora_Inicio, 108) AS Hora_Inicio,
-                    CONVERT(VARCHAR(5), S.Hora_Fin, 108) AS Hora_Fin,
-                    C.ID_Cancha, C.Nombre AS CanchaNombre,
-                    H.Tipo_Precio,
-                    R.ID_Reserva
-                FROM Slots S
-                INNER JOIN Canchas C ON S.ID_Cancha = C.ID_Cancha
-                INNER JOIN Horarios H ON S.ID_Horario = H.ID_Horario
-                LEFT JOIN Reservas R ON S.ID_Slots = R.ID_Slots
-                WHERE S.ID_Dueño = @id_dueño
-                  AND S.Fecha >= @fecha_inicio
-                  AND S.Fecha < @fecha_fin
-                ORDER BY S.Fecha ASC, C.Nombre ASC, S.Hora_Inicio ASC
+                    S.ID_SLOT, S.FECHA, S.ESTADO AS EstadoSlot,
+                    CONVERT(VARCHAR(5), S.HORA_INICIO, 108) AS Hora_Inicio,
+                    CONVERT(VARCHAR(5), S.HORA_FIN, 108) AS Hora_Fin,
+                    C.ID_CANCHA, C.NOMBRE AS CanchaNombre,
+                    H.TIPO_PRECIO,
+                    R.ID_RESERVA
+                FROM SLOTS S
+                INNER JOIN CANCHAS C ON S.ID_CANCHA = C.ID_CANCHA
+                INNER JOIN HORARIOS H ON S.ID_HORARIO = H.ID_HORARIO
+                LEFT JOIN RESERVAS R ON S.ID_SLOT = R.ID_SLOT
+                WHERE S.ID_DUENO = @id_dueño
+                  AND S.FECHA >= @fecha_inicio
+                  AND S.FECHA < @fecha_fin
+                ORDER BY S.FECHA ASC, C.NOMBRE ASC, S.HORA_INICIO ASC
             `);
         const colorMap = {
             DISPONIBLE: 'green', RESERVADO: 'blue', BLOQUEADO: 'gray',
             OFERTA: 'amber', NO_ASISTIO: 'red'
         };
         const slotsConColor = result.recordset.map(s => ({
-            ...s, Color: colorMap[s.EstadoSlot] || 'gray'
+            ...s, Color: colorMap[s.EstadoSlot] || 'gray', TIPO_PRECIO: mapTipoPrecioFromDB(s.TIPO_PRECIO)
         }));
         const dias = {};
         for (const slot of slotsConColor) {
-            const fecha = slot.Fecha.toISOString ? slot.Fecha.toISOString().split('T')[0] : slot.Fecha;
+            const fecha = slot.FECHA.toISOString ? slot.FECHA.toISOString().split('T')[0] : slot.FECHA;
             if (!dias[fecha]) dias[fecha] = {};
-            if (!dias[fecha][slot.ID_Cancha]) {
-                dias[fecha][slot.ID_Cancha] = { ID_Cancha: slot.ID_Cancha, Nombre: slot.CanchaNombre, slots: [] };
+            if (!dias[fecha][slot.ID_CANCHA]) {
+                dias[fecha][slot.ID_CANCHA] = { ID_CANCHA: slot.ID_CANCHA, Nombre: slot.CanchaNombre, slots: [] };
             }
-            dias[fecha][slot.ID_Cancha].slots.push(slot);
+            dias[fecha][slot.ID_CANCHA].slots.push(slot);
         }
         const fechas = [];
         const cursor = new Date(fechaInicio);
@@ -932,7 +1047,7 @@ const actualizarEstadoSlot = async (req, res, appPool) => {
         const check = await requestVerificar
             .input('id_slot', sql.Char(10), idSlot)
             .input('id_dueño', sql.Char(10), idDueno)
-            .query('SELECT ID_Slots FROM Slots WHERE ID_Slots = @id_slot AND ID_Dueño = @id_dueño');
+            .query('SELECT ID_SLOT FROM SLOTS WHERE ID_SLOT = @id_slot AND ID_DUENO = @id_dueño');
 
         if (check.recordset.length === 0) {
             return res.status(403).json({ status: 'error', error: 'No tienes autorización sobre este bloque horario.' });
@@ -943,18 +1058,18 @@ const actualizarEstadoSlot = async (req, res, appPool) => {
             .input('id_slot', sql.Char(10), idSlot)
             .input('estado', sql.VarChar(20), nuevoEstado)
             .query(`
-                UPDATE Slots
-                SET Estado = @estado,
-                    Fecha_Block = CASE WHEN @estado = 'BLOQUEADO' THEN GETDATE() ELSE NULL END,
-                    Fecha_Expira = CASE WHEN @estado = 'OFERTA' THEN DATEADD(DAY, 1, GETDATE()) ELSE NULL END
-                WHERE ID_Slots = @id_slot
+                UPDATE SLOTS
+                SET ESTADO = @estado,
+                    FECHA_BLOQUEO = CASE WHEN @estado = 'BLOQUEADO' THEN GETDATE() ELSE NULL END,
+                    FECHA_EXPIRA = CASE WHEN @estado = 'OFERTA' THEN DATEADD(DAY, 1, GETDATE()) ELSE NULL END
+                WHERE ID_SLOT = @id_slot
             `);
 
         // Si es un "No asistió" (D-11), también actualizamos el estado de la reserva vinculada a ese slot
         if (nuevoEstado === 'NO_ASISTIO') {
             await new sql.Request(appPool)
                 .input('id_slot', sql.Char(10), idSlot)
-                .query("UPDATE Reservas SET Estado = 'NO_SHOW' WHERE ID_Slots = @id_slot");
+                .query("UPDATE RESERVAS SET ESTADO = 'NO_SHOW' WHERE ID_SLOT = @id_slot");
         }
 
         res.status(200).json({ status: 'success', mensaje: `Slot actualizado a ${nuevoEstado} con éxito.` });
@@ -980,17 +1095,17 @@ const crearOfertaSlot = async (req, res, appPool) => {
         const slotData = await new sql.Request(appPool)
             .input('id_slot', sql.Char(10), idSlot)
             .input('id_dueño', sql.Char(10), idDueno)
-            .query('SELECT ID_Cancha, Estado FROM Slots WHERE ID_Slots = @id_slot AND ID_Dueño = @id_dueño');
+            .query('SELECT ID_CANCHA, ESTADO FROM SLOTS WHERE ID_SLOT = @id_slot AND ID_DUENO = @id_dueño');
 
         if (slotData.recordset.length === 0) {
             return res.status(404).json({ status: 'error', error: 'Slot no encontrado o ajeno al dueño.' });
         }
 
-        if (slotData.recordset[0].Estado !== 'DISPONIBLE') {
+        if (slotData.recordset[0].ESTADO !== 'DISPONIBLE') {
             return res.status(400).json({ status: 'error', error: 'No se puede lanzar una oferta sobre un slot reservado o bloqueado.' });
         }
 
-        const idCancha = slotData.recordset[0].ID_Cancha;
+        const idCancha = slotData.recordset[0].ID_CANCHA;
         const idOferta = `OFR-${Math.floor(100000 + Math.random() * 900000)}`;
 
         // 2. Iniciar transacción doble: Insertar Oferta + Cambiar estado de Slot a 'OFERTA'
@@ -1002,21 +1117,22 @@ const crearOfertaSlot = async (req, res, appPool) => {
                 .input('id_oferta', sql.Char(10), idOferta)
                 .input('id_cancha', sql.Char(10), idCancha)
                 .input('id_dueño', sql.Char(10), idDueno)
-                .input('porcen_desc', sql.Int, parseInt(porcentajeDescuento))
-                .input('prec_ofert', sql.Decimal(8, 2), parseFloat(precioOfertado))
+                .input('porcentaje_desc', sql.Int, parseInt(porcentajeDescuento))
+                .input('precio_oferta', sql.Decimal(8, 2), parseFloat(precioOfertado))
                 .input('estado', sql.VarChar(20), 'ACTIVO')
-                .input('fecha_expira', sql.DateTime, fechaExpira ? new Date(fechaExpira) : new Date())
+                .input('fecha_inicio', sql.DateTime, new Date())
+                .input('fecha_expira', sql.DateTime, fechaExpira ? new Date(fechaExpira) : new Date(Date.now() + 86400000))
                 .input('fecha_crea', sql.Date, new Date())
                 .query(`
-                    INSERT INTO Oferta (ID_Oferta, ID_Cancha, ID_Dueño, Porcen_Desc, Prec_Ofert, Estado, Fecha_Expira, Fecha_Crea)
-                    VALUES (@id_oferta, @id_cancha, @id_dueño, @porcen_desc, @prec_ofert, @estado, @fecha_expira, @fecha_crea)
+                    INSERT INTO OFERTAS (ID_OFERTA, ID_CANCHA, ID_DUENO, ID_SLOT, PORCENTAJE_DESC, PRECIO_OFERTA, FECHA_INICIO, FECHA_EXPIRA, ESTADO, FECHA_CREA)
+                    VALUES (@id_oferta, @id_cancha, @id_dueño, @id_slot, @porcentaje_desc, @precio_oferta, @fecha_inicio, @fecha_expira, @estado, @fecha_crea)
                 `);
 
             // Cambiamos el estado del slot para que el catálogo del Front lo pinte en ámbar/oferta
             await new sql.Request(transaction)
                 .input('id_slot', sql.Char(10), idSlot)
                 .input('fecha_expira', sql.DateTime, fechaExpira ? new Date(fechaExpira) : new Date(Date.now() + 86400000))
-                .query("UPDATE Slots SET Estado = 'OFERTA', Fecha_Expira = @fecha_expira WHERE ID_Slots = @id_slot");
+                .query("UPDATE SLOTS SET ESTADO = 'OFERTA', FECHA_EXPIRA = @fecha_expira WHERE ID_SLOT = @id_slot");
 
             await transaction.commit();
             res.status(201).json({ status: 'success', mensaje: '🔥 ¡Oferta relámpago publicada en el catálogo!', idOferta });
@@ -1034,6 +1150,71 @@ const crearOfertaSlot = async (req, res, appPool) => {
 
 
 // ==========================================
+// ❌ CANCELAR RESERVA (como dueño)
+// ==========================================
+const cancelarReserva = async (req, res, appPool) => {
+    const { idReserva } = req.params;
+    const { motivo } = req.body;
+    const idUser = req.user.id;
+
+    try {
+        const idDueno = await obtenerIdDueno(idUser, appPool);
+
+        const reserva = await new sql.Request(appPool)
+            .input('id_reserva', sql.Char(10), idReserva)
+            .input('id_dueño', sql.Char(10), idDueno)
+            .query(`
+                SELECT R.ID_RESERVA, R.ID_SLOT, R.ESTADO, R.MONTO_TOTAL
+                FROM RESERVAS R
+                WHERE R.ID_RESERVA = @id_reserva AND R.ID_DUENO = @id_dueño
+            `);
+
+        if (reserva.recordset.length === 0) {
+            return res.status(404).json({ status: 'error', error: 'Reserva no encontrada o no te pertenece.' });
+        }
+
+        const r = reserva.recordset[0];
+        if (!['PENDIENTE', 'CONFIRMADA'].includes(r.ESTADO)) {
+            return res.status(400).json({ status: 'error', error: 'Solo se pueden cancelar reservas PENDIENTE o CONFIRMADA.' });
+        }
+
+        const transaction = new sql.Transaction(appPool);
+        await transaction.begin();
+
+        try {
+            await new sql.Request(transaction)
+                .input('id_reserva', sql.Char(10), idReserva)
+                .input('cancelado_por', sql.VarChar(20), 'DUENO')
+                .input('fecha_cancelada', sql.DateTime, new Date())
+                .query(`
+                    UPDATE RESERVAS
+                    SET ESTADO = 'CANCELADA', CANCELADO_POR = @cancelado_por, FECHA_CANCELADA = @fecha_cancelada
+                    WHERE ID_RESERVA = @id_reserva
+                `);
+
+            await new sql.Request(transaction)
+                .input('id_slot', sql.Char(10), r.ID_SLOT)
+                .input('motivo', sql.VarChar(200), motivo || null)
+                .query(`
+                    UPDATE SLOTS
+                    SET ESTADO = 'DISPONIBLE', FECHA_EXPIRA = NULL
+                    WHERE ID_SLOT = @id_slot
+                `);
+
+            await transaction.commit();
+            res.status(200).json({ status: 'success', mensaje: 'Reserva cancelada correctamente. El slot ha sido liberado.' });
+        } catch (errTrans) {
+            await transaction.rollback();
+            throw errTrans;
+        }
+    } catch (error) {
+        if (error.message === 'DUEÑO_NOT_FOUND') return res.status(404).json({ status: 'error', error: 'Perfil de dueño no encontrado.' });
+        console.error('🚨 Error en cancelarReserva:', error);
+        res.status(500).json({ status: 'error', error: 'Error interno al cancelar la reserva.' });
+    }
+};
+
+// ==========================================
 // 🎯 GENERAR SLOTS (endpoint independiente)
 // ==========================================
 const generarSlots = async (req, res, appPool) => {
@@ -1044,7 +1225,7 @@ const generarSlots = async (req, res, appPool) => {
         const verify = await new sql.Request(appPool)
             .input('id_cancha', sql.Char(10), idCancha)
             .input('id_dueño', sql.Char(10), idDueno)
-            .query('SELECT ID_Cancha FROM Canchas WHERE ID_Cancha = @id_cancha AND ID_Dueño = @id_dueño');
+            .query('SELECT ID_CANCHA FROM CANCHAS WHERE ID_CANCHA = @id_cancha AND ID_DUENO = @id_dueño');
 
         if (verify.recordset.length === 0) {
             return res.status(404).json({ status: 'error', error: 'Cancha no encontrada o no te pertenece.' });
@@ -1052,7 +1233,7 @@ const generarSlots = async (req, res, appPool) => {
 
         const horariosCheck = await new sql.Request(appPool)
             .input('id_cancha', sql.Char(10), idCancha)
-            .query('SELECT COUNT(*) AS cnt FROM Horarios WHERE ID_Cancha = @id_cancha');
+            .query('SELECT COUNT(*) AS cnt FROM HORARIOS WHERE ID_CANCHA = @id_cancha');
 
         if (horariosCheck.recordset[0].cnt === 0) {
             return res.status(400).json({ status: 'error', error: 'No hay horarios activos para esta cancha. Configura horarios primero.' });
@@ -1062,13 +1243,13 @@ const generarSlots = async (req, res, appPool) => {
             .input('id_cancha', sql.Char(10), idCancha)
             .input('id_dueño', sql.Char(10), idDueno)
             .query(`
-                DELETE FROM Slots
-                WHERE ID_Horario IN (SELECT ID_Horario FROM Horarios WHERE ID_Cancha = @id_cancha)
-                  AND Estado NOT IN ('RESERVADO', 'NO_ASISTIO')
-                  AND Fecha >= CAST(GETDATE() AS DATE);
+                DELETE FROM SLOTS
+                WHERE ID_HORARIO IN (SELECT ID_HORARIO FROM HORARIOS WHERE ID_CANCHA = @id_cancha)
+                  AND ESTADO NOT IN ('RESERVADO', 'NO_ASISTIO')
+                  AND FECHA >= CAST(GETDATE() AS DATE);
 
                 DECLARE @contSlot INT;
-                SELECT @contSlot = ISNULL(MAX(CONVERT(INT, RIGHT(ID_SLOTS, 6))), 0) FROM Slots;
+                SELECT @contSlot = ISNULL(MAX(CONVERT(INT, RIGHT(ID_SLOT, 6))), 0) FROM SLOTS;
 
                 WITH fechas AS (
                     SELECT CAST(GETDATE() AS DATE) AS fecha
@@ -1077,24 +1258,30 @@ const generarSlots = async (req, res, appPool) => {
                     FROM fechas
                     WHERE fecha < DATEADD(DAY, 365, CAST(GETDATE() AS DATE))
                 )
-                INSERT INTO Slots (ID_SLOTS, ID_HORARIO, ID_CANCHA, ID_DUEÑO, FECHA, Hora_Inicio, Hora_Fin, ESTADO)
+                INSERT INTO SLOTS (ID_SLOT, ID_HORARIO, ID_CANCHA, ID_DUENO, FECHA, HORA_INICIO, HORA_FIN, PRECIO_FINAL, ESTADO)
                 SELECT
-                    'SLT-' + RIGHT('000000' + CAST(@contSlot + ROW_NUMBER() OVER (ORDER BY h.ID_HORARIO, f.fecha) AS VARCHAR(6)), 6),
-                    h.ID_HORARIO, h.ID_CANCHA, h.ID_DUEÑO,
+                    'SLT-' + RIGHT('000000' + CAST(@contSlot + ROW_NUMBER() OVER (ORDER BY h.ID_HORARIO, f.fecha) AS VARCHAR(10)), 6),
+                    h.ID_HORARIO, h.ID_CANCHA, h.ID_DUENO,
                     f.fecha,
-                    CAST(h.FECHA_INICIO AS TIME),
-                    CAST(h.FECHA_FIN AS TIME),
+                    h.HORA_INICIO,
+                    h.HORA_FIN,
+                    CASE h.TIPO_PRECIO
+                        WHEN 'PUNTA' THEN c.PRECIO_HORA_PUNTA
+                        WHEN 'VALLE' THEN c.PRECIO_HORA_VALLE
+                        ELSE c.PRECIO_BASE
+                    END,
                     'DISPONIBLE'
-                FROM Horarios h
+                FROM HORARIOS h
+                INNER JOIN CANCHAS c ON h.ID_CANCHA = c.ID_CANCHA
                 CROSS JOIN fechas f
-                WHERE h.ID_Cancha = @id_cancha
+                WHERE h.ID_CANCHA = @id_cancha
                   AND (DATEPART(WEEKDAY, f.fecha) + @@DATEFIRST - 1) % 7 = h.DIA_SEMANA
                   AND NOT EXISTS (
-                      SELECT 1 FROM Slots s
-                      WHERE s.ID_Cancha = @id_cancha
+                      SELECT 1 FROM SLOTS s
+                      WHERE s.ID_CANCHA = @id_cancha
                         AND s.FECHA = f.fecha
-                        AND s.Hora_Inicio = CAST(h.FECHA_INICIO AS TIME)
-                        AND s.Estado IN ('RESERVADO', 'NO_ASISTIO')
+                        AND s.HORA_INICIO = h.HORA_INICIO
+                        AND s.ESTADO IN ('RESERVADO', 'NO_ASISTIO')
                   )
                 OPTION (MAXRECURSION 365);
 
@@ -1115,6 +1302,46 @@ const generarSlots = async (req, res, appPool) => {
         res.status(500).json({ status: 'error', error: 'Error interno al generar slots.' });
     }
 };
+
+// ==========================================
+// 📋 SUSCRIPCIONES
+// ==========================================
+
+const obtenerSuscripcion = async (req, res, appPool) => {
+    const idUser = req.user.id;
+    try {
+        const idDueno = await obtenerIdDueno(idUser, appPool);
+        const result = await new sql.Request(appPool)
+            .input('id_dueño', sql.Char(10), idDueno)
+            .query(`
+                SELECT TOP 1 ID_SUSCRIPCION, [PLAN], PRECIO_MENSUAL, CANTIDAD_CANCHAS, FECHA_INICIO, FECHA_FIN, ESTADO
+                FROM SUSCRIPCIONES
+                WHERE ID_DUENO = @id_dueño
+                ORDER BY FECHA_INICIO DESC
+            `);
+        res.status(200).json({ status: 'success', data: result.recordset[0] || null });
+    } catch (error) {
+        if (error.message === 'DUEÑO_NOT_FOUND') return res.status(404).json({ status: 'error', error: 'Perfil de dueño no encontrado.' });
+        console.error('🚨 Error en obtenerSuscripcion:', error);
+        res.status(500).json({ status: 'error', error: 'Error interno al obtener suscripción.' });
+    }
+};
+
+const planesDisponibles = [
+    { plan: 'BASICO', precio: 0, canchas: 1, descripcion: '1 cancha, ideal para empezar' },
+    { plan: 'PRO', precio: 49.90, canchas: 3, descripcion: 'Hasta 3 canchas, ideal para crecer' },
+    { plan: 'PREMIUM', precio: 99.90, canchas: 10, descripcion: 'Hasta 10 canchas, máximo rendimiento' }
+];
+
+const listarPlanes = async (req, res, appPool) => {
+    res.status(200).json({ status: 'success', data: planesDisponibles });
+};
+
+const mapTipoPrecioToDB = (val) =>
+    ({ 'BASE': 'BASE', 'PRIME': 'PUNTA', 'BAJA': 'VALLE' })[val?.toUpperCase()] || 'BASE';
+
+const mapTipoPrecioFromDB = (val) =>
+    ({ 'PUNTA': 'PRIME', 'VALLE': 'BAJA' })[val] || val;
 
 // ==========================================
 // 🚀 EXPORTACIÓN UNIFICADA DE CONTROLADORES
@@ -1147,5 +1374,10 @@ module.exports = {
     obtenerDetalleReserva,
     obtenerCalendarioSemanal,
     actualizarEstadoSlot,
-    crearOfertaSlot
+    crearOfertaSlot,
+    cancelarReserva,
+
+    // Suscripciones
+    obtenerSuscripcion,
+    listarPlanes
 };

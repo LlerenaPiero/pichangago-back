@@ -60,8 +60,24 @@ async function sendMail({ to, subject, html }) {
   }
 }
 
+async function sendVerificationEmail({ email, nombre, verificationLink }) {
+  await sendMail({
+    to: email,
+    subject: '⚽ Confirma tu correo — PichangaGo',
+    html: buildTemplate(
+      'Verifica tu cuenta',
+      `<p>¡Hola, <strong>${nombre}</strong>!</p>
+       <p>Gracias por registrarte en PichangaGo. Para empezar a usar tu cuenta, confirma tu correo electrónico haciendo clic en el botón:</p>
+       <p style="font-size: 12px; color: #64748b;">Este enlace expirará en 24 horas.</p>`,
+      'Confirmar correo 📧',
+      verificationLink
+    )
+  });
+}
+
 async function sendWelcomeEmail({ email, nombre, rol }) {
-  const rolTexto = rol === 'DUENO' || rol === 'DUEÑO' ? 'dueño de canchas' : 'jugador';
+  const esDueno = rol === 'DUENO' || rol === 'DUEÑO';
+  const rolTexto = esDueno ? 'dueño de canchas' : 'jugador';
   await sendMail({
     to: email,
     subject: '⚽ ¡Bienvenido a PichangaGo!',
@@ -70,7 +86,7 @@ async function sendWelcomeEmail({ email, nombre, rol }) {
       `
         <p>¡Hola, <strong>${nombre}</strong>!</p>
         <p>Tu cuenta ha sido creada exitosamente como <strong>${rolTexto}</strong>.</p>
-        <p>Ya puedes empezar a ${rol === 'JUGADOR' ? 'reservar canchas deportivas' : 'gestionar tus canchas y recibir reservas'}.</p>
+        <p>Ya puedes empezar a ${esDueno ? 'gestionar tus canchas y recibir reservas' : 'reservar canchas deportivas'}.</p>
       `,
       'Ir a PichangaGo',
       process.env.FRONTEND_URL
@@ -135,6 +151,7 @@ async function sendOwnerNotification({ email, duenoNombre, jugadorNombre, cancha
 }
 
 module.exports = {
+  sendVerificationEmail,
   sendWelcomeEmail,
   sendResetPasswordEmail,
   sendReservationConfirmation,

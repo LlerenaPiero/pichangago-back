@@ -44,6 +44,7 @@ module.exports = (verificarToken, appPool) => {
     router.get('/agenda/semanal', ...auth, (req, res) => duenoController.obtenerCalendarioSemanal(req, res, appPool));
     router.get('/reservas/historial', ...auth, (req, res) => negocioController.obtenerHistorialReservas(req, res, appPool));
     router.get('/reservas/:idReserva', ...auth, (req, res) => duenoController.obtenerDetalleReserva(req, res, appPool));
+    router.post('/reservas/:idReserva/cancelar', ...auth, (req, res) => duenoController.cancelarReserva(req, res, appPool));
     router.put('/slots/:idSlot/estado', ...auth, estadoSlotRules, (req, res) => duenoController.actualizarEstadoSlot(req, res, appPool));
     router.post('/slots/:idSlot/oferta', ...auth, ofertaRules, (req, res) => duenoController.crearOfertaSlot(req, res, appPool));
 
@@ -53,6 +54,18 @@ module.exports = (verificarToken, appPool) => {
     router.get('/reportes/saldo-pendiente', ...auth, (req, res) => negocioController.obtenerSaldoPendiente(req, res, appPool));
     router.get('/reportes/liquidaciones', ...auth, (req, res) => negocioController.obtenerHistorialLiquidaciones(req, res, appPool));
     router.get('/reportes/ocupacion', ...auth, (req, res) => negocioController.obtenerEstadisticasOcupacion(req, res, appPool));
+    // Alias para compatibilidad con el frontend (rutas sin /reportes/)
+    router.get('/saldo-pendiente', ...auth, (req, res) => negocioController.obtenerSaldoPendiente(req, res, appPool));
+    router.get('/historial-liquidaciones', ...auth, (req, res) => negocioController.obtenerHistorialLiquidaciones(req, res, appPool));
+    router.get('/estadisticas/ocupacion', ...auth, (req, res) => negocioController.obtenerEstadisticasOcupacion(req, res, appPool));
+
+    // Suscripciones
+    router.get('/suscripcion', ...auth, (req, res) => duenoController.obtenerSuscripcion(req, res, appPool));
+    router.get('/planes', ...auth, (req, res) => duenoController.listarPlanes(req, res, appPool));
+
+    // Pagos y Reembolsos
+    router.get('/pagos', ...auth, (req, res) => negocioController.listarPagos(req, res, appPool));
+    router.get('/reembolsos', ...auth, (req, res) => negocioController.listarReembolsos(req, res, appPool));
 
     return router;
 };

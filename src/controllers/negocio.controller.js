@@ -4,9 +4,9 @@ const obtenerIdDueno = async (idUser, appPool) => {
     const request = new sql.Request(appPool);
     const result = await request
         .input('id_user', sql.Char(10), idUser)
-        .query('SELECT ID_Dueño FROM Dueño WHERE ID_User = @id_user');
+        .query('SELECT ID_DUENO FROM DUENOS WHERE ID_USER = @id_user');
     if (result.recordset.length === 0) throw new Error('DUEÑO_NOT_FOUND');
-    return result.recordset[0].ID_Dueño;
+    return result.recordset[0].ID_DUENO;
 };
 
 // D-14: Dashboard de KPIs
@@ -19,32 +19,32 @@ const obtenerDashboard = async (req, res, appPool) => {
             new sql.Request(appPool)
                 .input('id_dueño', sql.Char(10), idDueno)
                 .query(`
-                    SELECT COUNT(*) AS total, ISNULL(SUM(Monto_Total), 0) AS ingresos
-                    FROM Reservas
-                    WHERE ID_Dueño = @id_dueño
-                      AND CAST(Fecha_Crea AS DATE) = CAST(GETDATE() AS DATE)
-                      AND Estado = 'CONFIRMADA'
+                    SELECT COUNT(*) AS total, ISNULL(SUM(MONTO_TOTAL), 0) AS ingresos
+                    FROM RESERVAS
+                    WHERE ID_DUENO = @id_dueño
+                      AND CAST(FECHA_CREA AS DATE) = CAST(GETDATE() AS DATE)
+                      AND ESTADO = 'CONFIRMADA'
                 `),
             new sql.Request(appPool)
                 .input('id_dueño', sql.Char(10), idDueno)
                 .query(`
                     SELECT
                         COUNT(*) AS total_slots,
-                        SUM(CASE WHEN Estado = 'RESERVADO' THEN 1 ELSE 0 END) AS reservados
-                    FROM Slots
-                    WHERE ID_Dueño = @id_dueño AND Fecha = CAST(GETDATE() AS DATE)
+                        SUM(CASE WHEN ESTADO = 'RESERVADO' THEN 1 ELSE 0 END) AS reservados
+                    FROM SLOTS
+                    WHERE ID_DUENO = @id_dueño AND FECHA = CAST(GETDATE() AS DATE)
                 `),
             new sql.Request(appPool)
                 .input('id_dueño', sql.Char(10), idDueno)
                 .query(`
-                    SELECT TOP 1 ID_Liquid, Fecha_Inicio, Fecha_Fin, Monto_Neto, Estado
-                    FROM Liquidacion
-                    WHERE ID_Dueño = @id_dueño AND Estado = 'PENDIENTE'
-                    ORDER BY Fecha_Fin ASC
+                    SELECT TOP 1 ID_LIQUIDACION, FECHA_INICIO, FECHA_FIN, MONTO_NETO, ESTADO
+                    FROM LIQUIDACIONES
+                    WHERE ID_DUENO = @id_dueño AND ESTADO = 'PENDIENTE'
+                    ORDER BY FECHA_FIN ASC
                 `),
             new sql.Request(appPool)
                 .input('id_dueño', sql.Char(10), idDueno)
-                .query('SELECT COUNT(*) AS total FROM Canchas WHERE ID_Dueño = @id_dueño')
+                .query('SELECT COUNT(*) AS total FROM CANCHAS WHERE ID_DUENO = @id_dueño')
         ]);
 
         const rh = reservasHoy.recordset[0];
@@ -65,11 +65,11 @@ const obtenerDashboard = async (req, res, appPool) => {
                 },
                 total_canchas: totalCanchas.recordset[0].total,
                 proxima_liquidacion: pl ? {
-                    id: pl.ID_Liquid,
-                    fecha_inicio: pl.Fecha_Inicio,
-                    fecha_fin: pl.Fecha_Fin,
-                    monto_neto: pl.Monto_Neto,
-                    estado: pl.Estado
+                    id: pl.ID_LIQUIDACION,
+                    fecha_inicio: pl.FECHA_INICIO,
+                    fecha_fin: pl.FECHA_FIN,
+                    monto_neto: pl.MONTO_NETO,
+                    estado: pl.ESTADO
                 } : null
             }
         });
@@ -96,32 +96,32 @@ const obtenerReporteIngresos = async (req, res, appPool) => {
             .input('fecha_fin', sql.Date, fin)
             .query(`
                 SELECT
-                    R.ID_Reserva, R.Precio_Base, R.Comi_Qr, R.Monto_Total,
-                    R.Estado AS EstadoReserva, R.Fecha_Crea, R.Fecha_Confir,
-                    S.Fecha AS FechaSlot, CONVERT(VARCHAR(5), S.Hora_Inicio, 108) AS Hora_Inicio,
-                    CONVERT(VARCHAR(5), S.Hora_Fin, 108) AS Hora_Fin,
-                    C.Nombre AS CanchaNombre,
-                    U.Nombre AS JugadorNombre, U.APELLIDO AS JugadorApellido,
-                    P.ID_Pago, P.Monto AS MontoPagado, P.Estado AS EstadoPago,
+                    R.ID_RESERVA, R.PRECIO_BASE, R.COMISION_QR, R.MONTO_TOTAL,
+                    R.ESTADO AS EstadoReserva, R.FECHA_CREA, R.FECHA_CONFIRMADA,
+                    S.FECHA AS FechaSlot, CONVERT(VARCHAR(5), S.HORA_INICIO, 108) AS Hora_Inicio,
+                    CONVERT(VARCHAR(5), S.HORA_FIN, 108) AS Hora_Fin,
+                    C.NOMBRE AS CanchaNombre,
+                    U.NOMBRE AS JugadorNombre, U.APELLIDO AS JugadorApellido,
+                    P.ID_PAGO, P.MONTO AS MontoPagado, P.ESTADO AS EstadoPago,
                     CASE
-                        WHEN DATEPART(HOUR, S.Hora_Inicio) < 12 THEN 'MAÑANA'
-                        WHEN DATEPART(HOUR, S.Hora_Inicio) < 18 THEN 'TARDE'
+                        WHEN DATEPART(HOUR, S.HORA_INICIO) < 12 THEN 'MAÑANA'
+                        WHEN DATEPART(HOUR, S.HORA_INICIO) < 18 THEN 'TARDE'
                         ELSE 'NOCHE'
                     END AS Franja
-                FROM Reservas R
-                INNER JOIN Slots S ON R.ID_Slots = S.ID_Slots
-                INNER JOIN Canchas C ON R.ID_Cancha = C.ID_Cancha
-                INNER JOIN Usuario U ON R.ID_User = U.ID_USER
-                LEFT JOIN Pagos P ON R.ID_Reserva = P.ID_Reserva
-                WHERE R.ID_Dueño = @id_dueño
-                  AND CAST(R.Fecha_Crea AS DATE) >= @fecha_inicio
-                  AND CAST(R.Fecha_Crea AS DATE) <= @fecha_fin
-                ORDER BY R.Fecha_Crea DESC
+                FROM RESERVAS R
+                INNER JOIN SLOTS S ON R.ID_SLOT = S.ID_SLOT
+                INNER JOIN CANCHAS C ON R.ID_CANCHA = C.ID_CANCHA
+                INNER JOIN USUARIOS U ON R.ID_USER = U.ID_USER
+                LEFT JOIN PAGOS P ON R.ID_RESERVA = P.ID_RESERVA
+                WHERE R.ID_DUENO = @id_dueño
+                  AND CAST(R.FECHA_CREA AS DATE) >= @fecha_inicio
+                  AND CAST(R.FECHA_CREA AS DATE) <= @fecha_fin
+                ORDER BY R.FECHA_CREA DESC
             `);
 
         const filas = result.recordset;
-        const totalIngresos = filas.reduce((s, r) => s + (r.Monto_Total || 0), 0);
-        const totalComisiones = filas.reduce((s, r) => s + (r.Comi_Qr || 0), 0);
+        const totalIngresos = filas.reduce((s, r) => s + (r.MONTO_TOTAL || 0), 0);
+        const totalComisiones = filas.reduce((s, r) => s + (r.COMISION_QR || 0), 0);
 
         res.status(200).json({
             status: 'success',
@@ -152,17 +152,17 @@ const obtenerSaldoPendiente = async (req, res, appPool) => {
             new sql.Request(appPool)
                 .input('id_dueño', sql.Char(10), idDueno)
                 .query(`
-                    SELECT TOP 1 ID_Liquid, Fecha_Inicio, Fecha_Fin, Monto_Bruto, Comision_PGO, Monto_Neto, Estado
-                    FROM Liquidacion
-                    WHERE ID_Dueño = @id_dueño AND Estado = 'PENDIENTE'
-                    ORDER BY Fecha_Fin ASC
+                    SELECT TOP 1 ID_LIQUIDACION, FECHA_INICIO, FECHA_FIN, MONTO_BRUTO, COMISION_PGO, MONTO_NETO, ESTADO
+                    FROM LIQUIDACIONES
+                    WHERE ID_DUENO = @id_dueño AND ESTADO = 'PENDIENTE'
+                    ORDER BY FECHA_FIN ASC
                 `),
             new sql.Request(appPool)
                 .input('id_dueño', sql.Char(10), idDueno)
                 .query(`
-                    SELECT TOP 1 ID_Sub, [Plan], Precio_Mens, Cantidad_Canch
-                    FROM Suscripcion
-                    WHERE ID_Dueño = @id_dueño AND Estado = 'ACTIVO'
+                    SELECT TOP 1 ID_SUSCRIPCION, [PLAN], PRECIO_MENSUAL, CANTIDAD_CANCHAS
+                    FROM SUSCRIPCIONES
+                    WHERE ID_DUENO = @id_dueño AND ESTADO = 'ACTIVO'
                 `)
         ]);
 
@@ -170,8 +170,8 @@ const obtenerSaldoPendiente = async (req, res, appPool) => {
         const sub = suscripcion.recordset[0] || null;
 
         let fechaEstimada = null;
-        if (liq && liq.Fecha_Fin) {
-            const f = new Date(liq.Fecha_Fin);
+        if (liq && liq.FECHA_FIN) {
+            const f = new Date(liq.FECHA_FIN);
             f.setDate(f.getDate() + 15);
             fechaEstimada = f.toISOString().split('T')[0];
         }
@@ -180,16 +180,16 @@ const obtenerSaldoPendiente = async (req, res, appPool) => {
             status: 'success',
             data: {
                 liquidacion_pendiente: liq ? {
-                    id: liq.ID_Liquid,
-                    periodo: { inicio: liq.Fecha_Inicio, fin: liq.Fecha_Fin },
-                    monto_bruto: liq.Monto_Bruto,
-                    comision_pgo: liq.Comision_PGO,
-                    monto_neto: liq.Monto_Neto
+                    id: liq.ID_LIQUIDACION,
+                    periodo: { inicio: liq.FECHA_INICIO, fin: liq.FECHA_FIN },
+                    monto_bruto: liq.MONTO_BRUTO,
+                    comision_pgo: liq.COMISION_PGO,
+                    monto_neto: liq.MONTO_NETO
                 } : null,
                 suscripcion: sub ? {
-                    plan: sub.Plan,
-                    precio_mensual: sub.Precio_Mens,
-                    cantidad_canchas: sub.Cantidad_Canch
+                    plan: sub['PLAN'],
+                    precio_mensual: sub.PRECIO_MENSUAL,
+                    cantidad_canchas: sub.CANTIDAD_CANCHAS
                 } : null,
                 fecha_estimada_transferencia: fechaEstimada
             }
@@ -211,14 +211,14 @@ const obtenerHistorialLiquidaciones = async (req, res, appPool) => {
             .input('id_dueño', sql.Char(10), idDueno)
             .query(`
                 SELECT
-                    L.ID_Liquid, L.Fecha_Inicio, L.Fecha_Fin,
-                    L.Monto_Bruto, L.Comision_PGO, L.Monto_Neto,
-                    L.NRO_Operac, L.Fecha_Transf, L.Estado,
-                    ISNULL((SELECT TOP 1 S.[Plan] FROM Suscripcion S WHERE S.ID_Dueño = L.ID_Dueño ORDER BY S.ID_SUB DESC), '') AS [Plan],
-                    ISNULL((SELECT TOP 1 S.Precio_Mens FROM Suscripcion S WHERE S.ID_Dueño = L.ID_Dueño ORDER BY S.ID_SUB DESC), 0) AS Precio_Mens
-                FROM Liquidacion L
-                WHERE L.ID_Dueño = @id_dueño
-                ORDER BY L.Fecha_Fin DESC
+                    L.ID_LIQUIDACION, L.FECHA_INICIO, L.FECHA_FIN,
+                    L.MONTO_BRUTO, L.COMISION_PGO, L.MONTO_NETO,
+                    L.NRO_OPERACION, L.FECHA_TRANSF, L.ESTADO,
+                    ISNULL((SELECT TOP 1 S.PLAN FROM SUSCRIPCIONES S WHERE S.ID_DUENO = L.ID_DUENO ORDER BY S.ID_SUSCRIPCION DESC), '') AS [PLAN],
+                    ISNULL((SELECT TOP 1 S.PRECIO_MENSUAL FROM SUSCRIPCIONES S WHERE S.ID_DUENO = L.ID_DUENO ORDER BY S.ID_SUSCRIPCION DESC), 0) AS PRECIO_MENSUAL
+                FROM LIQUIDACIONES L
+                WHERE L.ID_DUENO = @id_dueño
+                ORDER BY L.FECHA_FIN DESC
             `);
 
         res.status(200).json({ status: 'success', data: result.recordset });
@@ -246,14 +246,14 @@ const obtenerEstadisticasOcupacion = async (req, res, appPool) => {
                 .input('year', sql.Int, parseInt(year))
                 .query(`
                     SELECT
-                        (DATEPART(WEEKDAY, Fecha) + @@DATEFIRST - 1) % 7 AS dia_semana,
+                        (DATEPART(WEEKDAY, FECHA) + @@DATEFIRST - 1) % 7 AS dia_semana,
                         COUNT(*) AS total_slots,
-                        SUM(CASE WHEN Estado IN ('RESERVADO', 'NO_ASISTIO') THEN 1 ELSE 0 END) AS ocupados
-                    FROM Slots
-                    WHERE ID_Dueño = @id_dueño
-                      AND MONTH(Fecha) = @month
-                      AND YEAR(Fecha) = @year
-                    GROUP BY (DATEPART(WEEKDAY, Fecha) + @@DATEFIRST - 1) % 7
+                        SUM(CASE WHEN ESTADO IN ('RESERVADO', 'NO_ASISTIO') THEN 1 ELSE 0 END) AS ocupados
+                    FROM SLOTS
+                    WHERE ID_DUENO = @id_dueño
+                      AND MONTH(FECHA) = @month
+                      AND YEAR(FECHA) = @year
+                    GROUP BY (DATEPART(WEEKDAY, FECHA) + @@DATEFIRST - 1) % 7
                     ORDER BY dia_semana
                 `),
             new sql.Request(appPool)
@@ -263,20 +263,20 @@ const obtenerEstadisticasOcupacion = async (req, res, appPool) => {
                 .query(`
                     SELECT
                         CASE
-                            WHEN DATEPART(HOUR, Hora_Inicio) < 12 THEN 'MAÑANA'
-                            WHEN DATEPART(HOUR, Hora_Inicio) < 18 THEN 'TARDE'
+                            WHEN DATEPART(HOUR, HORA_INICIO) < 12 THEN 'MAÑANA'
+                            WHEN DATEPART(HOUR, HORA_INICIO) < 18 THEN 'TARDE'
                             ELSE 'NOCHE'
                         END AS franja,
                         COUNT(*) AS total_slots,
-                        SUM(CASE WHEN Estado IN ('RESERVADO', 'NO_ASISTIO') THEN 1 ELSE 0 END) AS ocupados
-                    FROM Slots
-                    WHERE ID_Dueño = @id_dueño
-                      AND MONTH(Fecha) = @month
-                      AND YEAR(Fecha) = @year
+                        SUM(CASE WHEN ESTADO IN ('RESERVADO', 'NO_ASISTIO') THEN 1 ELSE 0 END) AS ocupados
+                    FROM SLOTS
+                    WHERE ID_DUENO = @id_dueño
+                      AND MONTH(FECHA) = @month
+                      AND YEAR(FECHA) = @year
                     GROUP BY
                         CASE
-                            WHEN DATEPART(HOUR, Hora_Inicio) < 12 THEN 'MAÑANA'
-                            WHEN DATEPART(HOUR, Hora_Inicio) < 18 THEN 'TARDE'
+                            WHEN DATEPART(HOUR, HORA_INICIO) < 12 THEN 'MAÑANA'
+                            WHEN DATEPART(HOUR, HORA_INICIO) < 18 THEN 'TARDE'
                             ELSE 'NOCHE'
                         END
                     ORDER BY franja
@@ -285,13 +285,13 @@ const obtenerEstadisticasOcupacion = async (req, res, appPool) => {
                 .input('id_dueño', sql.Char(10), idDueno)
                 .query(`
                     SELECT
-                        YEAR(Fecha) AS anio,
-                        MONTH(Fecha) AS mes,
+                        YEAR(FECHA) AS anio,
+                        MONTH(FECHA) AS mes,
                         COUNT(*) AS total_slots,
-                        SUM(CASE WHEN Estado IN ('RESERVADO', 'NO_ASISTIO') THEN 1 ELSE 0 END) AS ocupados
-                    FROM Slots
-                    WHERE ID_Dueño = @id_dueño
-                    GROUP BY YEAR(Fecha), MONTH(Fecha)
+                        SUM(CASE WHEN ESTADO IN ('RESERVADO', 'NO_ASISTIO') THEN 1 ELSE 0 END) AS ocupados
+                    FROM SLOTS
+                    WHERE ID_DUENO = @id_dueño
+                    GROUP BY YEAR(FECHA), MONTH(FECHA)
                     ORDER BY anio DESC, mes DESC
                 `)
         ]);
@@ -336,41 +336,41 @@ const obtenerHistorialReservas = async (req, res, appPool) => {
 
         let query = `
             SELECT
-                R.ID_Reserva, R.Precio_Base, R.Comi_Qr, R.Monto_Total,
-                R.Estado AS EstadoReserva, R.Fecha_Crea, R.Fecha_Confir, R.Fecha_Cancel,
-                R.Zona_Cancela, R.Porcen_Reemb,
-                U.Nombre AS JugadorNombre, U.APELLIDO AS JugadorApellido,
+                R.ID_RESERVA, R.PRECIO_BASE, R.COMISION_QR, R.MONTO_TOTAL,
+                R.ESTADO AS EstadoReserva, R.FECHA_CREA, R.FECHA_CONFIRMADA, R.FECHA_CANCELADA,
+                R.CANCELADO_POR, R.PORCENTAJE_REEMB,
+                U.NOMBRE AS JugadorNombre, U.APELLIDO AS JugadorApellido,
                 U.TELEFONO AS JugadorTelefono, U.EMAIL AS JugadorEmail,
-                S.Fecha AS FechaSlot,
-                CONVERT(VARCHAR(5), S.Hora_Inicio, 108) AS Hora_Inicio,
-                CONVERT(VARCHAR(5), S.Hora_Fin, 108) AS Hora_Fin,
-                C.Nombre AS CanchaNombre, L.Direccion, L.Distrito,
-                P.ID_Pago, P.Monto AS MontoPagado, P.Estado AS EstadoPago
-            FROM Reservas R
-            INNER JOIN Usuario U ON R.ID_User = U.ID_USER
-            INNER JOIN Slots S ON R.ID_Slots = S.ID_Slots
-            INNER JOIN Canchas C ON R.ID_Cancha = C.ID_Cancha
-            INNER JOIN Local L ON C.ID_Local = L.ID_Local
-            LEFT JOIN Pagos P ON R.ID_Reserva = P.ID_Reserva
-            WHERE R.ID_Dueño = @id_dueño
+                S.FECHA AS FechaSlot,
+                CONVERT(VARCHAR(5), S.HORA_INICIO, 108) AS Hora_Inicio,
+                CONVERT(VARCHAR(5), S.HORA_FIN, 108) AS Hora_Fin,
+                C.NOMBRE AS CanchaNombre, L.DIRECCION, L.DISTRITO,
+                P.ID_PAGO, P.MONTO AS MontoPagado, P.ESTADO AS EstadoPago
+            FROM RESERVAS R
+            INNER JOIN USUARIOS U ON R.ID_USER = U.ID_USER
+            INNER JOIN SLOTS S ON R.ID_SLOT = S.ID_SLOT
+            INNER JOIN CANCHAS C ON R.ID_CANCHA = C.ID_CANCHA
+            INNER JOIN LOCALES L ON C.ID_LOCAL = L.ID_LOCAL
+            LEFT JOIN PAGOS P ON R.ID_RESERVA = P.ID_RESERVA
+            WHERE R.ID_DUENO = @id_dueño
         `;
         const request = new sql.Request(appPool);
         request.input('id_dueño', sql.Char(10), idDueno);
 
         if (desde) {
-            query += ' AND CAST(R.Fecha_Crea AS DATE) >= @desde';
+            query += ' AND CAST(R.FECHA_CREA AS DATE) >= @desde';
             request.input('desde', sql.Date, desde);
         }
         if (hasta) {
-            query += ' AND CAST(R.Fecha_Crea AS DATE) <= @hasta';
+            query += ' AND CAST(R.FECHA_CREA AS DATE) <= @hasta';
             request.input('hasta', sql.Date, hasta);
         }
         if (estado) {
-            query += ' AND R.Estado = @estado';
+            query += ' AND R.ESTADO = @estado';
             request.input('estado', sql.VarChar(20), estado);
         }
 
-        query += ' ORDER BY R.Fecha_Crea DESC';
+        query += ' ORDER BY R.FECHA_CREA DESC';
 
         const result = await request.query(query);
 
@@ -382,11 +382,108 @@ const obtenerHistorialReservas = async (req, res, appPool) => {
     }
 };
 
+// ==========================================
+// 💳 PAGOS
+// ==========================================
+
+const listarPagos = async (req, res, appPool) => {
+    const idUser = req.user.id;
+    const { fecha_desde, fecha_hasta, estado } = req.query;
+    try {
+        const idDueno = await obtenerIdDueno(idUser, appPool);
+
+        let query = `
+            SELECT P.ID_PAGO, P.ID_RESERVA, P.MONTO, P.ESTADO, P.FECHA_PAGO, P.METODO_PAGO,
+                   R.MONTO_TOTAL, R.ESTADO AS EstadoReserva,
+                   C.NOMBRE AS CanchaNombre, L.DISTRITO,
+                   U.NOMBRE AS JugadorNombre, U.APELLIDO AS JugadorApellido
+            FROM PAGOS P
+            INNER JOIN RESERVAS R ON P.ID_RESERVA = R.ID_RESERVA
+            INNER JOIN CANCHAS C ON R.ID_CANCHA = C.ID_CANCHA
+            INNER JOIN LOCALES L ON C.ID_LOCAL = L.ID_LOCAL
+            INNER JOIN USUARIOS U ON R.ID_USER = U.ID_USER
+            WHERE R.ID_DUENO = @id_dueño
+        `;
+        const request = new sql.Request(appPool);
+        request.input('id_dueño', sql.Char(10), idDueno);
+
+        if (fecha_desde) {
+            query += ' AND CAST(P.FECHA_PAGO AS DATE) >= @fecha_desde';
+            request.input('fecha_desde', sql.Date, fecha_desde);
+        }
+        if (fecha_hasta) {
+            query += ' AND CAST(P.FECHA_PAGO AS DATE) <= @fecha_hasta';
+            request.input('fecha_hasta', sql.Date, fecha_hasta);
+        }
+        if (estado) {
+            query += ' AND P.ESTADO = @estado';
+            request.input('estado', sql.VarChar(20), estado);
+        }
+
+        query += ' ORDER BY P.FECHA_PAGO DESC';
+
+        const result = await request.query(query);
+        res.status(200).json({ status: 'success', data: result.recordset });
+    } catch (error) {
+        if (error.message === 'DUEÑO_NOT_FOUND') return res.status(404).json({ status: 'error', error: 'Perfil de dueño no encontrado.' });
+        console.error('🚨 Error en listarPagos:', error);
+        res.status(500).json({ status: 'error', error: 'Error interno al listar pagos.' });
+    }
+};
+
+// ==========================================
+// 🔄 REEMBOLSOS
+// ==========================================
+
+const listarReembolsos = async (req, res, appPool) => {
+    const idUser = req.user.id;
+    const { fecha_desde, fecha_hasta } = req.query;
+    try {
+        const idDueno = await obtenerIdDueno(idUser, appPool);
+
+        let query = `
+            SELECT RB.ID_REEMBOLSO, RB.ID_RESERVA, RB.MONTO_REEMBOLSADO, RB.FECHA_SOLICITUD,
+                   RB.FECHA_PROCESADO, RB.ESTADO, RB.MOTIVO,
+                   R.MONTO_TOTAL, R.ESTADO AS EstadoReserva,
+                   C.NOMBRE AS CanchaNombre, L.DISTRITO,
+                   U.NOMBRE AS JugadorNombre, U.APELLIDO AS JugadorApellido
+            FROM REEMBOLSOS RB
+            INNER JOIN RESERVAS R ON RB.ID_RESERVA = R.ID_RESERVA
+            INNER JOIN CANCHAS C ON R.ID_CANCHA = C.ID_CANCHA
+            INNER JOIN LOCALES L ON C.ID_LOCAL = L.ID_LOCAL
+            INNER JOIN USUARIOS U ON R.ID_USER = U.ID_USER
+            WHERE R.ID_DUENO = @id_dueño
+        `;
+        const request = new sql.Request(appPool);
+        request.input('id_dueño', sql.Char(10), idDueno);
+
+        if (fecha_desde) {
+            query += ' AND CAST(RB.FECHA_SOLICITUD AS DATE) >= @fecha_desde';
+            request.input('fecha_desde', sql.Date, fecha_desde);
+        }
+        if (fecha_hasta) {
+            query += ' AND CAST(RB.FECHA_SOLICITUD AS DATE) <= @fecha_hasta';
+            request.input('fecha_hasta', sql.Date, fecha_hasta);
+        }
+
+        query += ' ORDER BY RB.FECHA_SOLICITUD DESC';
+
+        const result = await request.query(query);
+        res.status(200).json({ status: 'success', data: result.recordset });
+    } catch (error) {
+        if (error.message === 'DUEÑO_NOT_FOUND') return res.status(404).json({ status: 'error', error: 'Perfil de dueño no encontrado.' });
+        console.error('🚨 Error en listarReembolsos:', error);
+        res.status(500).json({ status: 'error', error: 'Error interno al listar reembolsos.' });
+    }
+};
+
 module.exports = {
     obtenerDashboard,
     obtenerReporteIngresos,
     obtenerSaldoPendiente,
     obtenerHistorialLiquidaciones,
     obtenerEstadisticasOcupacion,
-    obtenerHistorialReservas
+    obtenerHistorialReservas,
+    listarPagos,
+    listarReembolsos
 };

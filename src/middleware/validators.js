@@ -75,6 +75,16 @@ const canchaRules = [
     .optional().isFloat({ min: 0, max: 999999.99 }).withMessage('Precio prime inválido.'),
   body('precioBaja')
     .optional().isFloat({ min: 0, max: 999999.99 }).withMessage('Precio baja inválido.'),
+  body('tipoDeporte')
+    .optional().trim()
+    .isLength({ max: 10 }).withMessage('tipoDeporte no puede exceder 10 caracteres.'),
+  body('tipoSuperficie')
+    .optional().trim()
+    .isIn(['GRASS_SINTETICO', 'GRASS_NATURAL', 'LOSA', 'TIERRA', 'OTRO']).withMessage('tipoSuperficie no válido.'),
+  body('esTechada')
+    .optional().isBoolean().withMessage('esTechada debe ser booleano.'),
+  body('tieneIluminacion')
+    .optional().isBoolean().withMessage('tieneIluminacion debe ser booleano.'),
   handleValidationErrors
 ];
 
@@ -88,6 +98,10 @@ const localRules = [
   body('distrito')
     .trim().notEmpty().withMessage('El distrito es obligatorio.')
     .isLength({ max: 50 }).withMessage('El distrito no puede exceder 50 caracteres.'),
+  body('departamento')
+    .optional().trim().isLength({ max: 50 }).withMessage('El departamento no puede exceder 50 caracteres.'),
+  body('provincia')
+    .optional().trim().isLength({ max: 50 }).withMessage('La provincia no puede exceder 50 caracteres.'),
   body('referencia')
     .optional().trim().isLength({ max: 200 }).withMessage('La referencia no puede exceder 200 caracteres.'),
   handleValidationErrors
@@ -136,7 +150,7 @@ const horarioRules = [
 
 const estadoCanchaRules = [
   body('estado')
-    .trim().toUpperCase().isIn(['DISPONIBLE', 'SUSPENDIDO', 'INACTIVO']).withMessage('Estado debe ser DISPONIBLE, SUSPENDIDO o INACTIVO.'),
+    .trim().toUpperCase().isIn(['DISPONIBLE', 'MANTENIMIENTO', 'INACTIVA']).withMessage('Estado debe ser DISPONIBLE, MANTENIMIENTO o INACTIVA.'),
   handleValidationErrors
 ];
 
@@ -149,7 +163,7 @@ const estadoSlotRules = [
 
 const ofertaRules = [
   body('porcentajeDescuento')
-    .isInt({ min: 1, max: 100 }).withMessage('porcentajeDescuento debe ser 1-100.'),
+    .isInt({ min: 1, max: 50 }).withMessage('porcentajeDescuento debe ser 1-50.'),
   body('precioOfertado')
     .isFloat({ min: 0, max: 999999.99 }).withMessage('precioOfertado inválido.'),
   body('fechaExpira')
@@ -172,6 +186,21 @@ const updateProfileRules = [
   handleValidationErrors
 ];
 
+const changePasswordRules = [
+  body('currentPassword')
+    .notEmpty().withMessage('La contraseña actual es obligatoria.'),
+  body('newPassword')
+    .isLength({ min: 6, max: 100 }).withMessage('La nueva contraseña debe tener entre 6 y 100 caracteres.'),
+  body('confirmNewPassword')
+    .custom((value, { req }) => {
+      if (value !== req.body.newPassword) {
+        throw new Error('Las contraseñas no coinciden.');
+      }
+      return true;
+    }),
+  handleValidationErrors
+];
+
 module.exports = {
   registerRules,
   loginRules,
@@ -184,5 +213,6 @@ module.exports = {
   estadoCanchaRules,
   estadoSlotRules,
   ofertaRules,
-  updateProfileRules
+  updateProfileRules,
+  changePasswordRules
 };

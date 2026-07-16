@@ -8,18 +8,22 @@
 
 ## Índice
 
-- [1. Salud y Estado](#1-salud-y-estado)
-- [2. Autenticación](#2-autenticación)
-- [3. Catálogo Público de Canchas](#3-catálogo-público-de-canchas)
-- [4. Jugador — Reservas](#4-jugador--reservas)
-- [5. Dueño — Locales](#5-dueño--locales)
-- [6. Dueño — Canchas](#6-dueño--canchas)
-- [7. Dueño — Perfil](#7-dueño--perfil)
-- [8. Dueño — Horarios y Tarifas](#8-dueño--horarios-y-tarifas)
-- [9. Dueño — Agenda y Slots](#9-dueño--agenda-y-slots)
-- [10. Dueño — Reportes y Analytics](#10-dueño--reportes-y-analytics)
-- [11. Imágenes (Azure Blob Proxy)](#11-imágenes-azure-blob-proxy)
-- [12. Socket.IO — Notificaciones en Tiempo Real](#12-socketio--notificaciones-en-tiempo-real)
+1. [Salud y Estado](#1-salud-y-estado)
+2. [Autenticación](#2-autenticación)
+3. [Catálogo Público de Canchas](#3-catálogo-público-de-canchas)
+4. [Ubicaciones (Público)](#4-ubicaciones-público)
+5. [Jugador — Reservas y Perfil](#5-jugador--reservas-y-perfil)
+6. [Dueño — Locales](#6-dueño--locales)
+7. [Dueño — Canchas](#7-dueño--canchas)
+8. [Dueño — Perfil](#8-dueño--perfil)
+9. [Dueño — Horarios y Tarifas](#9-dueño--horarios-y-tarifas)
+10. [Dueño — Agenda y Slots](#10-dueño--agenda-y-slots)
+11. [Dueño — Reportes y Analytics](#11-dueño--reportes-y-analytics)
+12. [Dueño — Suscripciones](#12-dueño--suscripciones)
+13. [Dueño — Pagos y Reembolsos](#13-dueño--pagos-y-reembolsos)
+14. [Imágenes (Azure Blob Proxy)](#14-imágenes-azure-blob-proxy)
+15. [Socket.IO — Notificaciones en Tiempo Real](#15-socketio--notificaciones-en-tiempo-real)
+16. [Sistema de Correos Electrónicos](#16-sistema-de-correos-electrónicos)
 
 ---
 
@@ -97,7 +101,26 @@ Registrar un nuevo usuario.
 }
 ```
 
-**Nota**: Al registrarse como `DUENO`/`DUEÑO` se crea automáticamente un registro en la tabla `Dueño` con valores por defecto (RUC vacío, banco `BCP`).
+**Nota**: Al registrarse como `DUENO`/`DUEÑO` se crea automáticamente un registro en la tabla `DUENOS` con valores por defecto.
+
+---
+
+### `POST /api/auth/google`
+
+Iniciar sesión o registrarse con Google OAuth.
+
+**Auth**: No requerida
+
+**Body**:
+```json
+{
+  "idToken": "eyJhbGciOiJSUzI1NiIs..."
+}
+```
+
+**Response** `200`: Misma estructura que `POST /api/login`.
+
+**Nota**: Si el email ya existe, inicia sesión. Si no existe, crea un usuario con rol `CLIENTE` (JUGADOR). No crea perfil de dueño.
 
 ---
 
@@ -151,7 +174,7 @@ Iniciar sesión.
 
 Cerrar sesión globalmente. Invalida **todos** los tokens del usuario incrementando `TOKEN_VERSION`.
 
-**Auth**: No requerida (usa refreshToken del body)
+**Auth**: Usa refreshToken del body (no requiere header)
 
 **Body**:
 ```json
@@ -289,10 +312,22 @@ Listar todas las canchas disponibles con filtros opcionales.
 
 | Parámetro | Tipo | Descripción |
 |-----------|------|-------------|
-| `distrito` | string | Filtro por distrito (LIKE) |
-| `nombre` | string | Filtro por nombre (LIKE) |
+| `departamento` | string | Filtro por departamento |
+| `provincia` | string | Filtro por provincia |
+| `distrito` | string | Filtro por distrito |
+| `nombre` | string | Búsqueda por nombre, dirección o distrito (LIKE) |
 | `precioMin` | number | Precio base mínimo |
 | `precioMax` | number | Precio base máximo |
+| `superficie` | string | Tipo de superficie (`GRASS_SINTETICO`, `GRASS_NATURAL`, `LOSA`, `TIERRA`, `OTRO`) |
+| `techada` | boolean (`1/0`) | Filtrar canchas techadas |
+| `iluminacion` | boolean (`1/0`) | Filtrar canchas con iluminación |
+| `lat` | number | Latitud del usuario (ordena por cercanía) |
+| `lng` | number | Longitud del usuario (ordena por cercanía) |
+| `fecha` | string (YYYY-MM-DD) | Filtra canchas con slots disponibles en esa fecha |
+| `hora` | string (HH:mm) | Filtra canchas con slots disponibles a esa hora (requiere `fecha`) |
+| `tipo` | string | Código de tipo de cancha (F5, F6, F7, F8, F11) |
+
+> **⚠️ Frontend**: Los filtros `departamento`, `provincia`, `distrito`, `superficie`, `techada`, `iluminacion` existen pero no están siendo usados en el frontend actual. Puedes implementar filtros avanzados.
 
 **Response** `200`:
 ```json
@@ -301,8 +336,12 @@ Listar todas las canchas disponibles con filtros opcionales.
   "data": [
     {
       "ID_Cancha": "CHN-123456",
+      "Slug": "cancha-sintetica-a-chn123456",
       "Nombre": "Cancha Sintética A",
       "Descripcion": "Cancha de césped sintético",
+      "Tipo_Superficie": "GRASS_SINTETICO",
+      "Es_Techada": true,
+      "Tiene_Iluminacion": true,
       "Precio_Base": 50.00,
       "Precio_Prime": 70.00,
       "Precio_Baja": 35.00,
@@ -312,6 +351,8 @@ Listar todas las canchas disponibles con filtros opcionales.
       "LocalNombre": "Complejo Deportivo A",
       "Direccion": "Av. Principal 123",
       "Distrito": "Miraflores",
+      "Departamento": "Lima",
+      "TipoNombre": "Fútbol 7",
       "ID_Dueño": "DUE-999001",
       "DueñoNombre": "Ricardo",
       "DueñoApellido": "Mendoza",
@@ -329,52 +370,43 @@ Listar todas las canchas disponibles con filtros opcionales.
 }
 ```
 
----
-
-### `GET /api/canchas/ofertas-hoy`
-
-Obtener slots en oferta para hoy (o mañana si no hay más hoy).
-
-**Auth**: No requerida
-
-**Response** `200`:
-```json
-{
-  "status": "success",
-  "data": [
-    {
-      "ID_Slots": "SLT-000001",
-      "ID_Cancha": "CHN-123456",
-      "Nombre": "Cancha Sintética A",
-      "Distrito": "Miraflores",
-      "Rating": 4.5,
-      "Fotos": [
-        {
-          "ID_Foto": "PHO-123456",
-          "URL_Foto": "/api/uploads?blob=..."
-        }
-      ],
-      "Dia_Semana": "Martes",
-      "Hora_Inicio": "14:00",
-      "Hora_Fin": "15:00",
-      "Precio_Original": 50.00,
-      "Precio_Oferta": 25.00,
-      "Descuento": 50,
-      "Minutos_Restantes": "9h 30min"
-    }
-  ]
-}
-```
+> **⚠️ Frontend**: Los campos ahora incluyen `Slug`, `Tipo_Superficie`, `Es_Techada`, `Tiene_Iluminacion`, `Departamento`, `TipoNombre`. Actualiza las tarjetas de cancha para mostrar esta información.
 
 ---
 
 ### `GET /api/canchas/:id`
 
-Obtener detalle de una cancha específica.
+Obtener detalle de una cancha específica por ID (`CHN-XXXXXX`) o por slug.
 
 **Auth**: No requerida
 
+**Params**: `id` puede ser el ID de cancha o un slug (cadena con guiones).
+
 **Response** `200`: Misma estructura que un elemento del listado.
+
+> **⚠️ Frontend**: Usa esta ruta para redirigir desde URLs como `/cancha/cancha-sintetica-a-chn123456`. El backend detecta automáticamente si es slug o ID.
+
+---
+
+### `GET /api/canchas/search/:slug`
+
+Búsqueda pública de cancha por slug (para SEO / URLs amigables).
+
+**Auth**: No requerida
+
+**Params**: `slug` — slug exacto de la cancha.
+
+**Response** `200`: Misma estructura que un elemento del listado.
+
+**Response** `404`:
+```json
+{
+  "status": "error",
+  "error": "Cancha no encontrada."
+}
+```
+
+> **⚠️ Frontend**: **NUEVO**. Usa esta ruta para páginas SEO-friendly como `/cancha/<slug>` con SSR o cliente. La ruta `GET /api/canchas/:id` también acepta slugs, pero esta es más explícita.
 
 ---
 
@@ -396,12 +428,68 @@ Obtener slots disponibles de una cancha para una fecha específica.
   "status": "success",
   "data": [
     {
-      "ID_Slots": "SLT-000001",
+      "ID_Slot": "SLT-000001",
       "Fecha": "2026-06-19",
       "Hora_Inicio": "08:00",
       "Hora_Fin": "09:00",
       "EstadoSlot": "DISPONIBLE",
-      "Tipo_Precio": "BASE"
+      "Tipo_Precio": "BASE",
+      "Precio": 50.00
+    }
+  ]
+}
+```
+
+**Nota**: `Tipo_Precio` siempre será `BASE`, `PRIME` o `BAJA`. El backend mapea automáticamente desde `PUNTA`/`VALLE` (valores internos de la BD). El frontend nunca debe usar `PUNTA` o `VALLE`.
+
+---
+
+### `GET /api/canchas/tipos-cancha`
+
+Obtener todos los tipos de cancha disponibles.
+
+**Auth**: No requerida
+
+**Response** `200`:
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "ID_Tipo_Cancha": "TC-000001",
+      "Codigo": "F7",
+      "Nombre": "Fútbol 7",
+      "Jugadores_Por_Equipo": 7,
+      "Jugadores_Total": 14,
+      "Tamano": "Mediana",
+      "Descripcion": "Cancha de fútbol 7"
+    }
+  ]
+}
+```
+
+> **⚠️ Frontend**: Usa este endpoint para popular el selector de tipo de cancha en los formularios de registro. El campo `Codigo` es el que se envía como `tipo` en el body de crear cancha.
+
+---
+
+### `GET /api/canchas/:id/reviews`
+
+Obtener reseñas públicas de una cancha.
+
+**Auth**: No requerida
+
+**Response** `200`:
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "ID_Review": "REV-123456",
+      "Calificacion": 5,
+      "Comentarios": "Excelente cancha",
+      "Fecha_Crea": "2026-06-01",
+      "JugadorNombre": "Carlos",
+      "JugadorApellido": "García"
     }
   ]
 }
@@ -409,7 +497,93 @@ Obtener slots disponibles de una cancha para una fecha específica.
 
 ---
 
-## 4. Jugador — Reservas
+### `GET /api/canchas/ofertas-hoy`
+
+Obtener slots en oferta para hoy (o mañana si no hay más hoy).
+
+**Auth**: No requerida
+
+**Response** `200`:
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "ID_Slot": "SLT-000001",
+      "ID_Cancha": "CHN-123456",
+      "Slug": "cancha-sintetica-a-chn123456",
+      "Nombre": "Cancha Sintética A",
+      "Distrito": "Miraflores",
+      "Rating": 4.5,
+      "Fotos": [
+        {
+          "ID_Foto": "PHO-123456",
+          "URL_Foto": "/api/uploads?blob=..."
+        }
+      ],
+      "Dia_Semana": "Martes",
+      "Hora_Inicio": "14:00",
+      "Hora_Fin": "15:00",
+      "Precio_Original": 50.00,
+      "Precio_Oferta": 25.00,
+      "Descuento": 50,
+      "Minutos_Restantes": "9h 30min"
+    }
+  ]
+}
+```
+
+> **⚠️ Frontend**: Incluye ahora `Slug` para navegación directa a la cancha.
+
+---
+
+## 4. Ubicaciones (Público)
+
+Todas las rutas bajo `/api/ubicaciones`. **No requieren autenticación**. Obtienen datos desde los locales registrados.
+
+### `GET /api/ubicaciones/departamentos`
+
+Listar departamentos disponibles (desde locales activos).
+
+**Response** `200`:
+```json
+{
+  "status": "success",
+  "data": ["Lima", "Arequipa", "Cusco"]
+}
+```
+
+### `GET /api/ubicaciones/provincias?departamento=Lima`
+
+Listar provincias. Opcionalmente filtradas por departamento.
+
+**Response** `200`:
+```json
+{
+  "status": "success",
+  "data": ["Lima", "Cañete", "Huarochirí"]
+}
+```
+
+### `GET /api/ubicaciones/distritos?departamento=Lima&provincia=Lima`
+
+Listar distritos. Opcionalmente filtrados por departamento y/o provincia.
+
+**Response** `200`:
+```json
+{
+  "status": "success",
+  "data": ["Miraflores", "San Isidro", "Barranco"]
+}
+```
+
+> **⚠️ Frontend**: **NUEVO**. Útil para filtros geográficos en el catálogo de canchas o formularios de registro. Inicialmente solo devuelve ubicaciones que tienen locales registrados.
+
+---
+
+## 5. Jugador — Reservas y Perfil
+
+Todas las rutas bajo `/api/jugador`. Requieren auth + rol `JUGADOR`.
 
 ### `POST /api/canchas/reservar`
 
@@ -443,15 +617,16 @@ Crear una reserva en una cancha. Realiza una transacción atómica: verifica dis
 ```
 
 **Detalles del flujo**:
-1. Verifica que la cancha existe y obtiene `ID_DUEÑO` y `PRECIO_BASE`
+1. Verifica que la cancha existe y obtiene datos del dueño
 2. Inicia transacción
 3. Verifica que cada slot esté en estado `DISPONIBLE` u `OFERTA`
 4. Genera `ID_RESERVA` (`RES-XXXXXX`) y `ID_COMPROBANTE` (`CMP-XXXXXX`)
-5. Calcula comisión QR (5% del `montoTotal`)
+5. Calcula comisión QR (5% del `montoTotal`) — redondeado a 2 decimales
 6. Inserta registro en `RESERVAS`
 7. Inserta registro en `COMPROBANTES`
 8. Actualiza cada slot a estado `RESERVADO`
 9. Commitea la transacción
+10. Envía correos en background (confirmación al jugador + notificación al dueño)
 
 ---
 
@@ -484,11 +659,101 @@ Obtener el historial de reservas del jugador autenticado.
 }
 ```
 
-**Nota**: Las fechas se formatean automáticamente de UTC a `YYYY-MM-DD` y las URLs de fotos se convierten al proxy local.
+---
+
+### `GET /api/jugador/reservas/:idReserva`
+
+Detalle completo de una reserva.
+
+**Auth**: Requerida
 
 ---
 
-## 5. Dueño — Locales
+### `POST /api/jugador/reservas/:idReserva/cancelar`
+
+Cancelar una reserva. Puede generar reembolso.
+
+**Auth**: Requerida
+
+---
+
+### `GET /api/jugador/reservas/:idReserva/comprobante`
+
+Descargar comprobante de pago de una reserva.
+
+**Auth**: Requerida
+
+---
+
+### `POST /api/jugador/reviews`
+
+Crear una reseña para una cancha.
+
+**Auth**: Requerida
+
+**Body**:
+```json
+{
+  "idCancha": "CHN-123456",
+  "idReserva": "RES-123456",
+  "calificacion": 5,
+  "comentarios": "Excelente cancha"
+}
+```
+
+---
+
+### `GET /api/jugador/perfil`
+
+Obtener perfil del jugador.
+
+**Auth**: Requerida
+
+---
+
+### `PUT /api/jugador/perfil`
+
+Actualizar datos personales del jugador.
+
+**Auth**: Requerida
+
+**Body** (todos opcionales):
+```json
+{
+  "nombre": "Carlos",
+  "apellido": "García",
+  "telefono": "999888777"
+}
+```
+
+---
+
+### `POST /api/jugador/cambiar-contrasena`
+
+Cambiar contraseña del jugador.
+
+**Auth**: Requerida
+
+**Body**:
+```json
+{
+  "currentPassword": "actual123",
+  "newPassword": "nueva456",
+  "confirmNewPassword": "nueva456"
+}
+```
+
+---
+
+### `GET /api/jugador/dashboard`
+
+Resumen / KPIs del jugador (reservas activas, próximas, etc.).
+
+**Auth**: Requerida
+
+---
+
+## 6. Dueño — Locales
 
 Todas las rutas bajo `/api/dueno`. Requieren auth + rol `DUENO`/`DUEÑO`.
 
@@ -502,9 +767,13 @@ Registrar un nuevo local.
   "nombre": "Complejo Deportivo A",
   "direccion": "Av. Principal 123",
   "distrito": "Miraflores",
+  "departamento": "Lima",
+  "provincia": "Lima",
   "referencia": "Altura del óvalo"
 }
 ```
+
+**Campos opcionales**: `departamento`, `provincia`, `referencia`, `latitud`, `longitud`
 
 **Response** `201`:
 ```json
@@ -519,7 +788,7 @@ Registrar un nuevo local.
 
 ### `GET /api/dueno/locales`
 
-Listar todos los locales del dueño autenticado.
+Listar todos los locales del dueño autenticado con sus canchas.
 
 **Response**:
 ```json
@@ -532,17 +801,26 @@ Listar todos los locales del dueño autenticado.
       "Direccion": "Av. Principal 123",
       "Distrito": "Miraflores",
       "Referencia": "Altura del óvalo",
+      "Pais": "PERU",
+      "Departamento": "Lima",
+      "Provincia": "Lima",
+      "Latitud": null,
+      "Longitud": null,
       "Estado": "ACTIVO",
       "Fecha_Crea": "2026-01-15",
       "Canchas": [
         {
           "ID_Cancha": "CHN-123456",
+          "Slug": "cancha-sintetica-a-chn123456",
           "CanchaNombre": "Cancha 1",
           "Descripcion": "...",
           "Precio_Base": 50.00,
           "Precio_Prime": 70.00,
           "Precio_Baja": 35.00,
-          "CanchaEstado": "DISPONIBLE"
+          "CanchaEstado": "DISPONIBLE",
+          "Tipo_Superficie": "GRASS_SINTETICO",
+          "Es_Techada": true,
+          "Tiene_Iluminacion": true
         }
       ]
     }
@@ -554,7 +832,7 @@ Listar todos los locales del dueño autenticado.
 
 ### `GET /api/dueno/locales/:idLocal`
 
-Obtener detalle de un local por ID.
+Obtener detalle de un local por ID (con sus canchas).
 
 ---
 
@@ -566,11 +844,13 @@ Actualizar datos de un local.
 
 ---
 
-## 6. Dueño — Canchas
+## 7. Dueño — Canchas
 
 ### `POST /api/dueno/canchas`
 
 Registrar una nueva cancha bajo un local existente.
+
+**Validación importante**: Antes de crear la cancha, el backend verifica que el dueño no haya excedido el límite de canchas permitidas por su plan de suscripción activo. Si lo excede, devuelve error `400`.
 
 **Body** (multipart/form-data):
 
@@ -582,24 +862,38 @@ Registrar una nueva cancha bajo un local existente.
 | precioBase | number | Sí | Precio en hora base |
 | precioPrime | number | No | Precio hora prime (default: precioBase) |
 | precioBaja | number | No | Precio hora baja (default: precioBase) |
+| tipo | string | Sí | Código del tipo de cancha: F5, F6, F7, F8, F11 |
+| tipoSuperficie | string | No | `GRASS_SINTETICO`, `GRASS_NATURAL`, `LOSA`, `TIERRA`, `OTRO` |
+| esTechada | boolean | No | `true`/`false` |
+| tieneIluminacion | boolean | No | `true`/`false` |
 | foto | file | No | Imagen (JPG/PNG/WEBP/AVIF, max 5MB) |
 
 **Response** `201`:
 ```json
 {
   "status": "success",
-  "mensaje": "Cancha registrada en Lima con éxito.",
+  "mensaje": "Cancha registrada con éxito.",
   "idCancha": "CHN-123456"
 }
 ```
 
-**Nota**: La cancha se crea en estado `INACTIVO`. Pasa a `DISPONIBLE` al configurar horarios.
+**Response** `400` (límite excedido):
+```json
+{
+  "status": "error",
+  "error": "Has alcanzado el límite de 3 cancha(s) según tu plan."
+}
+```
+
+**Nota**: La cancha se crea en estado `INACTIVA`. Pasa a `DISPONIBLE` al configurar horarios.
+
+> **⚠️ Frontend**: **NUEVA VALIDACIÓN**. Debes mostrar un mensaje claro cuando el dueño alcance el límite de canchas de su plan. Incluye un botón/CTA para "Mejorar plan" que lleve a la sección de suscripciones.
 
 ---
 
 ### `GET /api/dueno/canchas`
 
-Listar todas las canchas del dueño autenticado.
+Listar todas las canchas del dueño autenticado (con fotos).
 
 **Response**:
 ```json
@@ -615,6 +909,7 @@ Listar todas las canchas del dueño autenticado.
       "Precio_Baja": 35.00,
       "Estado": "DISPONIBLE",
       "Fecha_Crea": "2026-01-15",
+      "Slug": "cancha-1-chn123456",
       "ID_Local": "LOC-123456",
       "LocalNombre": "Complejo A",
       "LocalDireccion": "Av. Principal 123",
@@ -651,6 +946,9 @@ Editar información de la cancha. Soporta reemplazo o adición de foto.
 | precioBase | number | Nuevo precio base |
 | precioPrime | number | Nuevo precio prime |
 | precioBaja | number | Nuevo precio baja |
+| tipoSuperficie | string | Nuevo tipo de superficie |
+| esTechada | boolean | ¿Es techada? |
+| tieneIluminacion | boolean | ¿Tiene iluminación? |
 | foto | file | Nueva imagen |
 | reemplazarFotoId | string | ID de foto a reemplazar (opcional, si no se envía agrega una nueva) |
 
@@ -667,13 +965,15 @@ Cambiar estado de una cancha (borrado lógico).
 }
 ```
 
-**Estados válidos**: `DISPONIBLE`, `SUSPENDIDO`, `INACTIVO`
+**Estados válidos**: `DISPONIBLE`, `MANTENIMIENTO`, `INACTIVA`
+
+> **⚠️ Frontend**: El estado `SUSPENDIDO` fue reemplazado por `MANTENIMIENTO`. Actualiza los selectores de estado.
 
 ---
 
 ### `GET /api/dueno/canchas/:idCancha/reviews`
 
-Obtener reviews de una cancha.
+Obtener reviews de una cancha del dueño (con promedio).
 
 **Response**:
 ```json
@@ -704,7 +1004,7 @@ Eliminar una foto de una cancha (elimina de BD y de Azure Blob Storage).
 
 ---
 
-## 7. Dueño — Perfil
+## 8. Dueño — Perfil
 
 ### `GET /api/dueno/perfil`
 
@@ -785,7 +1085,7 @@ Actualizar datos financieros. El banco se auto-detecta desde el CCI si no se env
 
 ---
 
-## 8. Dueño — Horarios y Tarifas
+## 9. Dueño — Horarios y Tarifas
 
 ### `POST /api/dueno/canchas/:idCancha/horarios`
 
@@ -812,10 +1112,12 @@ Configurar horarios de apertura y tipo de tarifa para una cancha. Elimina horari
 ```
 
 **Reglas**:
-- `diaSemana`: 0 (domingo) a 6 (sábado)
-- `horaInicio` / `horaFin`: formato `HH:00` o `HH:30`
+- `diaSemana`: 1 (lunes) a 7 (domingo)
+- `horaInicio` / `horaFin`: formato `HH:00` o `HH:30` (bloques de 30 min)
 - `tipoPrecio`: `BASE`, `PRIME`, `BAJA`
 - La cancha pasa automáticamente a estado `DISPONIBLE`
+
+> **⚠️ Frontend**: `tipoPrecio` debe enviarse como `PRIME` o `BAJA`. El backend se encarga de convertirlo internamente a `PUNTA`/`VALLE` para la BD. El frontend **no debe realizar ninguna conversión**.
 
 ---
 
@@ -831,14 +1133,16 @@ Obtener horarios configurados de una cancha.
     {
       "ID_Horario": "HOR-123456",
       "Dia_Semana": 1,
-      "Fecha_Inicio": "2025-01-01T08:00:00.000Z",
-      "Fecha_Fin": "2025-01-01T22:00:00.000Z",
+      "Hora_Inicio": "08:00",
+      "Hora_Fin": "22:00",
       "Tipo_Precio": "BASE",
       "Estado": "ACTIVO"
     }
   ]
 }
 ```
+
+> **⚠️ Frontend**: `Tipo_Precio` siempre se devuelve como `PRIME`/`BAJA`. El backend mapea automáticamente desde los valores internos de la BD. No se requiere conversión en el frontend.
 
 ---
 
@@ -859,7 +1163,7 @@ Fuerza la regeneración de slots para los próximos 365 días basado en los hora
 
 ---
 
-## 9. Dueño — Agenda y Slots
+## 10. Dueño — Agenda y Slots
 
 ### `GET /api/dueno/agenda/diaria?fecha=YYYY-MM-DD`
 
@@ -871,23 +1175,27 @@ Agenda del día con slots, reservas y datos del jugador.
   "status": "success",
   "data": [
     {
-      "ID_Slots": "SLT-000001",
+      "ID_Slot": "SLT-000001",
       "Fecha": "2026-06-19",
       "EstadoSlot": "RESERVADO",
       "ID_Cancha": "CHN-123456",
       "CanchaNombre": "Cancha 1",
-      "Fecha_Inicio": "2025-01-01T08:00:00.000Z",
-      "Fecha_Fin": "2025-01-01T09:00:00.000Z",
+      "Hora_Inicio": "08:00",
+      "Hora_Fin": "09:00",
       "Tipo_Precio": "BASE",
+      "Precio": 50.00,
       "ID_Reserva": "RES-123456",
       "Monto_Total": 50.00,
       "EstadoReserva": "CONFIRMADA",
       "JugadorNombre": "Carlos",
-      "JugadorTelefono": "999111222"
+      "JugadorTelefono": "999111222",
+      "Foto": "/api/uploads?blob=..."
     }
   ]
 }
 ```
+
+> **⚠️ Frontend**: `Tipo_Precio` siempre se devuelve como `PRIME`/`BAJA`. No se requiere conversión.
 
 ---
 
@@ -911,12 +1219,13 @@ Calendario semanal (7 días) con slots y colores por estado.
             "Nombre": "Cancha 1",
             "slots": [
               {
-                "ID_Slots": "SLT-000001",
+                "ID_Slot": "SLT-000001",
                 "Fecha": "2026-06-16",
                 "EstadoSlot": "DISPONIBLE",
                 "Hora_Inicio": "08:00",
                 "Hora_Fin": "09:00",
                 "Tipo_Precio": "BASE",
+                "Precio": 50.00,
                 "Color": "green"
               }
             ]
@@ -990,11 +1299,16 @@ Detalle completo de una reserva (incluye pago, jugador, cancha, local).
     "ID_Pago": "PAG-123456",
     "MontoPagado": 50.00,
     "EstadoPago": "COMPLETADO",
-    "Fecha_Proces": "2026-06-19",
-    "Culqi_Response": null
+    "Fecha_Proces": "2026-06-19"
   }
 }
 ```
+
+---
+
+### `POST /api/dueno/reservas/:idReserva/cancelar`
+
+Cancelar una reserva como dueño (con opción de reembolso).
 
 ---
 
@@ -1017,7 +1331,7 @@ Cambiar estado manual de un slot.
 
 ### `POST /api/dueno/slots/:idSlot/oferta`
 
-Crear una oferta de último minuto para un slot disponible. Inserta registro en `Oferta` y cambia el slot a estado `OFERTA`.
+Crear una oferta de último minuto para un slot disponible. Inserta registro en `OFERTAS` y cambia el slot a estado `OFERTA`.
 
 **Body**:
 ```json
@@ -1041,7 +1355,7 @@ Crear una oferta de último minuto para un slot disponible. Inserta registro en 
 
 ---
 
-## 10. Dueño — Reportes y Analytics
+## 11. Dueño — Reportes y Analytics
 
 ### `GET /api/dueno/dashboard`
 
@@ -1124,7 +1438,7 @@ Reporte detallado de ingresos en un rango de fechas.
 
 ### `GET /api/dueno/reportes/saldo-pendiente`
 
-Saldo pendiente de liquidación + suscripción activa.
+Saldo pendiente de liquidación + suscripción activa. / También disponible en `GET /api/dueno/saldo-pendiente`.
 
 **Response**:
 ```json
@@ -1154,7 +1468,7 @@ Saldo pendiente de liquidación + suscripción activa.
 
 ### `GET /api/dueno/reportes/liquidaciones`
 
-Historial de todas las liquidaciones del dueño.
+Historial de todas las liquidaciones del dueño. / También disponible en `GET /api/dueno/historial-liquidaciones`.
 
 **Response**:
 ```json
@@ -1182,7 +1496,7 @@ Historial de todas las liquidaciones del dueño.
 
 ### `GET /api/dueno/reportes/ocupacion?mes=6&anio=2026`
 
-Estadísticas de ocupación por día de semana, franja horaria y mes.
+Estadísticas de ocupación por día de semana, franja horaria y mes. / También disponible en `GET /api/dueno/estadisticas/ocupacion`.
 
 **Valores por defecto**: Mes y año actuales.
 
@@ -1227,7 +1541,164 @@ Estadísticas de ocupación por día de semana, franja horaria y mes.
 
 ---
 
-## 11. Imágenes (Azure Blob Proxy)
+## 12. Dueño — Suscripciones
+
+### `GET /api/dueno/suscripcion`
+
+Obtener la suscripción activa del dueño (o la más reciente).
+
+**Auth**: Requerida (dueño autenticado)
+
+**Response** `200`:
+```json
+{
+  "status": "success",
+  "data": {
+    "ID_Suscripcion": "SUB-123456",
+    "Plan": "PRO",
+    "Precio_Mensual": 49.90,
+    "Cantidad_Canchas": 3,
+    "Fecha_Inicio": "2026-01-01",
+    "Fecha_Fin": null,
+    "Estado": "ACTIVO"
+  }
+}
+```
+
+**Response** `200` (sin suscripción):
+```json
+{
+  "status": "success",
+  "data": null
+}
+```
+
+> **⚠️ Frontend**: **NUEVO**. Útil para mostrar el plan actual del dueño en la sección de configuración / facturación.
+
+---
+
+### `GET /api/dueno/planes`
+
+Listar los planes de suscripción disponibles.
+
+**Auth**: Requerida (dueño autenticado)
+
+**Response** `200`:
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "plan": "BASICO",
+      "precio": 0,
+      "canchas": 1,
+      "descripcion": "1 cancha, ideal para empezar"
+    },
+    {
+      "plan": "PRO",
+      "precio": 49.90,
+      "canchas": 3,
+      "descripcion": "Hasta 3 canchas, ideal para crecer"
+    },
+    {
+      "plan": "PREMIUM",
+      "precio": 99.90,
+      "canchas": 10,
+      "descripcion": "Hasta 10 canchas, máximo rendimiento"
+    }
+  ]
+}
+```
+
+> **⚠️ Frontend**: **NUEVO**. Muestra una tabla comparativa de planes. Cada plan indica cuántas canchas permite. Usa `Cantidad_Canchas` para informar al dueño si puede agregar más canchas o necesita mejorar de plan.
+
+---
+
+## 13. Dueño — Pagos y Reembolsos
+
+### `GET /api/dueno/pagos`
+
+Listar pagos recibidos por las reservas del dueño.
+
+**Auth**: Requerida (dueño autenticado)
+
+**Query params** (todos opcionales):
+
+| Parámetro | Tipo | Descripción |
+|-----------|------|-------------|
+| `fecha_desde` | string | Fecha inicial (YYYY-MM-DD) |
+| `fecha_hasta` | string | Fecha final (YYYY-MM-DD) |
+| `estado` | string | Filtrar por estado de pago |
+
+**Response** `200`:
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "ID_Pago": "PAG-123456",
+      "ID_Reserva": "RES-123456",
+      "Monto": 50.00,
+      "Estado": "COMPLETADO",
+      "Fecha_Pago": "2026-06-19T15:30:00.000Z",
+      "Metodo_Pago": "QR",
+      "Monto_Total": 50.00,
+      "EstadoReserva": "CONFIRMADA",
+      "CanchaNombre": "Cancha 1",
+      "Distrito": "Miraflores",
+      "JugadorNombre": "Carlos",
+      "JugadorApellido": "García"
+    }
+  ]
+}
+```
+
+> **⚠️ Frontend**: **NUEVO**. Implementa una tabla de pagos con filtros por fecha y estado. Muestra monto, jugador, cancha y método de pago. Útil para conciliación.
+
+---
+
+### `GET /api/dueno/reembolsos`
+
+Listar reembolsos procesados en las reservas del dueño.
+
+**Auth**: Requerida (dueño autenticado)
+
+**Query params** (todos opcionales):
+
+| Parámetro | Tipo | Descripción |
+|-----------|------|-------------|
+| `fecha_desde` | string | Fecha inicial (YYYY-MM-DD) |
+| `fecha_hasta` | string | Fecha final (YYYY-MM-DD) |
+
+**Response** `200`:
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "ID_Reembolso": "REM-123456",
+      "ID_Reserva": "RES-123456",
+      "Monto_Reembolsado": 25.00,
+      "Fecha_Solicitud": "2026-06-20T10:00:00.000Z",
+      "Fecha_Procesado": "2026-06-20T14:00:00.000Z",
+      "Estado": "PROCESADO",
+      "Motivo": "CANCELACION_VOLUNTARIA",
+      "Monto_Total": 50.00,
+      "EstadoReserva": "CANCELADA",
+      "CanchaNombre": "Cancha 1",
+      "Distrito": "Miraflores",
+      "JugadorNombre": "Carlos",
+      "JugadorApellido": "García"
+    }
+  ]
+}
+```
+
+> **⚠️ Frontend**: **NUEVO**. Implementa una tabla de reembolsos. Muestra al dueño el historial de devoluciones.
+
+---
+
+## 14. Imágenes (Azure Blob Proxy)
 
 ### `GET /api/uploads?blob=<nombre_archivo>`
 
@@ -1259,7 +1730,7 @@ Content-MD5: base64md5hash...
 
 ---
 
-## 12. Socket.IO — Notificaciones en Tiempo Real
+## 15. Socket.IO — Notificaciones en Tiempo Real
 
 **Endpoint**: Mismo servidor (puerto 5000)
 
@@ -1293,7 +1764,7 @@ socket.on('connect', () => {
 
 ---
 
-## 13. Sistema de Correos Electrónicos
+## 16. Sistema de Correos Electrónicos
 
 El backend envía correos transaccionales usando **Gmail API con OAuth2** (o App Password como fallback).  
 El servicio está centralizado en `src/config/email.js`.
@@ -1303,6 +1774,7 @@ El servicio está centralizado en `src/config/email.js`.
 | Tipo | Disparador | Destinatario |
 |------|-----------|--------------|
 | **Bienvenida** | `POST /api/register` exitoso | Usuario registrado |
+| **Bienvenida Google** | `POST /api/auth/google` (nuevo usuario) | Usuario registrado |
 | **Restablecer contraseña** | `POST /api/forgot-password` | Usuario solicitante |
 | **Confirmación de reserva** | `POST /api/canchas/reservar` exitoso | Jugador que reservó |
 | **Notificación al dueño** | `POST /api/canchas/reservar` exitoso | Dueño de la cancha |
@@ -1311,7 +1783,7 @@ El servicio está centralizado en `src/config/email.js`.
 
 - Los correos se envían en **segundo plano** (no bloquean la respuesta de la API).
 - Si el servicio de email no está configurado, se muestra una advertencia en consola y la API funciona sin errores.
-- El envío fallido de un correo **no revierte** la operación que lo disparó (ej: un registro exitoso no se deshace si el email de bienvenida falla).
+- El envío fallido de un correo **no revierte** la operación que lo disparó.
 
 ### Configuración
 
@@ -1333,8 +1805,46 @@ EMAIL_PASS=tu-app-password
 
 ### Plantillas
 
-Todos los correus usan una plantilla HTML común con:
+Todos los correos usan una plantilla HTML común con:
 - Logo/encabezado de PichangaGo
 - Contenido dinámico del mensaje
 - Botón de llamada a la acción (CTA)
-- Footer con año y "Hecho en Perú 🇵🇪"
+- Footer con año
+
+---
+
+## 📋 Resumen de Cambios Recientes para el Frontend
+
+### 🔴 Cambios Obligatorios
+
+| # | Cambio | Impacto | Endpoints Afectados |
+|---|--------|---------|---------------------|
+| 1 | `tipoPrecio` siempre usa `PRIME`/`BAJA` en frontend. Backend mapea internamente a `PUNTA`/`VALLE` para la BD. | No requiere cambios. El frontend siempre envió/recibió `PRIME`/`BAJA`. | POST horarios, GET horarios, GET slots, GET agenda, GET calendario |
+| 2 | El estado `SUSPENDIDO` de cancha fue reemplazado por `MANTENIMIENTO` | Actualizar constantes/selectores | PATCH estado cancha |
+| 3 | Validación de `CANTIDAD_CANCHAS` al registrar cancha | Mostrar error + enlace a "Mejorar plan" | POST canchas |
+| 4 | Eliminación total de `PREFERENCIAS_JUGADOR` | No hay endpoints ni datos de preferencias | N/A |
+
+### 🟢 Nuevos Endpoints
+
+| Endpoint | Método | Descripción |
+|----------|--------|-------------|
+| `/api/canchas/search/:slug` | GET | Búsqueda por slug (SEO) |
+| `/api/canchas/tipos-cancha` | GET | Lista tipos de cancha |
+| `/api/ubicaciones/departamentos` | GET | Departamentos disponibles |
+| `/api/ubicaciones/provincias` | GET | Provincias (filtro por dep) |
+| `/api/ubicaciones/distritos` | GET | Distritos (filtro por dep/prov) |
+| `/api/dueno/suscripcion` | GET | Suscripción activa del dueño |
+| `/api/dueno/planes` | GET | Planes disponibles |
+| `/api/dueno/pagos` | GET | Historial de pagos |
+| `/api/dueno/reembolsos` | GET | Historial de reembolsos |
+| `/api/auth/google` | POST | Login/Registro con Google |
+
+### 🔵 Mejoras Sugeridas para UX
+
+1. **Dashboard del dueño**: Agregar widget de "Estado de suscripción" con botón "Mejorar plan"
+2. **Registro de cancha**: Mostrar cuántas canchas quedan disponibles según el plan actual
+3. **Tabla de pagos**: Agregar filtros por fecha, estado de pago, cancha
+4. **Tabla de reembolsos**: Visualizar historial de devoluciones desde el panel del dueño
+5. **Búsqueda por slug**: Generar URLs amigables tipo `/cancha/<slug>` para SEO
+6. **Filtros de canchas**: Implementar los filtros por `superficie`, `techada`, `iluminacion` que ya existen en backend
+7. **Selector de ubicación**: Usar los endpoints de `/api/ubicaciones/*` para cascada departamento→provincia→distrito

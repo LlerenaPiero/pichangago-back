@@ -13,9 +13,12 @@ module.exports = (appPool, poolConnect) => {
   });
 
   router.get('/', (req, res) => canchasController.listarCanchas(req, res, appPool));
+  router.get('/tipos-cancha', (req, res) => canchasController.listarTiposCancha(req, res, appPool));
   router.get('/ofertas-hoy', (req, res) => canchasController.obtenerOfertasHoy(req, res, appPool));
+  router.get('/search/:slug', (req, res) => canchasController.buscarPorSlug(req, res, appPool));
   router.get('/:id', (req, res) => canchasController.obtenerCancha(req, res, appPool));
   router.get('/:id/slots', (req, res) => canchasController.obtenerSlotsCancha(req, res, appPool));
+  router.get('/:id/reviews', (req, res) => canchasController.obtenerReviewsPublicas(req, res, appPool));
 
   return router;
 };
