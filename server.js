@@ -173,7 +173,11 @@ app.post('/api/register', registerLimiter, registerRules, async (req, res) => {
     await transaction.begin();
 
     try {
-      // 4. Insertar en la tabla Usuario
+      // 4. Normalizar rol: JUGADOR/CLIENTE → CLIENTE, DUEÑO/DUENO → DUENO
+      const rolLimpio = rol ? rol.toUpperCase().trim() : '';
+      const rolBD = (rolLimpio === 'DUEÑO' || rolLimpio === 'DUENO') ? 'DUENO' : 'CLIENTE';
+
+      // 5. Insertar en la tabla Usuario
       await new sql.Request(transaction)
         .input('id_user', sql.Char(10), idUser)
         .input('email', sql.VarChar(100), email)
@@ -190,10 +194,6 @@ app.post('/api/register', registerLimiter, registerRules, async (req, res) => {
           VALUES (@id_user, @email, @psw_hsh, @nombre, @apellido, @rol, @estado, @telefono, @fecha_crea, @token_version)
         `);
 
-      // 5. Normalizar el rol: JUGADOR/CLIENTE → CLIENTE, DUEÑO/DUENO → DUENO
-      const rolLimpio = rol ? rol.toUpperCase().trim() : '';
-      const rolBD = (rolLimpio === 'DUEÑO' || rolLimpio === 'DUENO') ? 'DUENO' : 'CLIENTE';
-      
       if (rolLimpio === 'DUEÑO' || rolLimpio === 'DUENO') {
   const idDueno = `DUE-${Math.floor(100000 + Math.random() * 900000)}`;
   
