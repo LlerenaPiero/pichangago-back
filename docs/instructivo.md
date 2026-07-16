@@ -29,6 +29,8 @@ Crea el usuario con `EMAIL_VERIFICADO = 0`. **No permite iniciar sesión** hasta
 }
 ```
 
+**Roles válidos:** `DUENO`, `DUEÑO`, `JUGADOR`, `CLIENTE` (todos se normalizan internamente: `JUGADOR`/`CLIENTE` → `CLIENTE`, `DUENO`/`DUEÑO` → `DUENO`)
+
 **Response 201:**
 ```json
 {
@@ -144,6 +146,8 @@ Login o registro con Google.
 - Si el email **ya existe**: inicia sesión. Si estaba sin verificar, lo marca como verificado.
 - **Response:** misma estructura que login.
 
+**IMPORTANTE:** Los usuarios de Google tienen `PSW_HSH = 'GOOGLE_AUTH'` en la BD (no tienen contraseña). El flujo de cambio de contraseña debe adaptarse (ver punto 11).
+
 ---
 
 ### 6. `POST /api/forgot-password`
@@ -257,6 +261,65 @@ Renueva el access token usando el refresh token.
 
 ---
 
+### 11. `POST /api/jugador/cambiar-contrasena`
+
+Cambiar o establecer contraseña. **Se comporta diferente según el tipo de usuario.**
+
+**Auth:** Requerida (Bearer token)
+
+**Body:**
+```json
+{
+  "currentPassword": "miClaveActual",
+  "newPassword": "miNuevaClave",
+  "confirmNewPassword": "miNuevaClave"
+}
+```
+
+#### Comportamiento:
+
+| Tipo de usuario | `currentPassword` | Resultado |
+|----------------|-------------------|-----------|
+| Registro normal (tiene hash bcrypt) | **Obligatorio** — se valida contra la BD | Se actualiza la contraseña |
+| Google Auth (`PSW_HSH = 'GOOGLE_AUTH'`) | **Se ignora** — no es necesario enviarlo | Se establece la contraseña por primera vez |
+
+**Response 200 (usuario normal):**
+```json
+{
+  "status": "success",
+  "mensaje": "Contraseña actualizada correctamente.",
+  "esPrimeraVez": false
+}
+```
+
+**Response 200 (usuario Google estableciendo contraseña):**
+```json
+{
+  "status": "success",
+  "mensaje": "Contraseña establecida correctamente. Ya puedes iniciar sesión con tu nueva contraseña.",
+  "esPrimeraVez": true
+}
+```
+
+#### Instrucciones para el frontend:
+
+1. **Obtener el perfil del usuario** (`GET /api/jugador/perfil`) para saber si es cuenta Google.
+   - El endpoint `GET /api/jugador/perfil` devuelve un campo `esGoogleAuth: true/false`.
+   - Si el frontend no tiene este campo, puede detectarlo si el usuario se logueó con Google (guardar el método de login al iniciar sesión).
+
+2. **Si el usuario es de Google:**
+   - Mostrar el formulario como **"Establecer contraseña"** en vez de "Cambiar contraseña".
+   - No pedir `currentPassword`.
+   - Botón con texto: "Establecer contraseña".
+   - Mensaje de éxito: "Contraseña establecida correctamente".
+
+3. **Si el usuario es normal:**
+   - Mostrar formulario como **"Cambiar contraseña"**.
+   - Pedir `currentPassword` + `newPassword` + `confirmNewPassword`.
+   - Botón con texto: "Cambiar contraseña".
+
+---
+
 ## Resumen de cambios respecto a la versión anterior
 
 | Endpoint | Cambio |
@@ -269,6 +332,8 @@ Renueva el access token usando el refresh token.
 | `POST /api/reset-password` | **MEJORA** — Valida token contra BD, lo marca como usado |
 | `GET /api/validate-session` | **MEJORA** — Ahora devuelve datos del usuario |
 | Middleware `verificarToken` | **MEJORA** — Valida estado activo + email verificado en cada request |
+| `POST /api/jugador/cambiar-contrasena` | **MEJORA** — Soporta cuentas Google sin contraseña actual |
+| `POST /api/register` (rol) | **FIX** — Mapea `JUGADOR`/`CLIENTE` a `CLIENTE`, `DUENO`/`DUEÑO` a `DUENO` |
 
 ## Rutas que el frontend debe implementar
 

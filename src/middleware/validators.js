@@ -188,7 +188,7 @@ const updateProfileRules = [
 
 const changePasswordRules = [
   body('currentPassword')
-    .notEmpty().withMessage('La contraseña actual es obligatoria.'),
+    .optional({ values: 'falsy' }),
   body('newPassword')
     .isLength({ min: 6, max: 100 }).withMessage('La nueva contraseña debe tener entre 6 y 100 caracteres.'),
   body('confirmNewPassword')

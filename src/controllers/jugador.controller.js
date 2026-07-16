@@ -558,9 +558,17 @@ const cambiarContrasena = async (req, res, appPool) => {
       return res.status(404).json({ status: 'error', error: 'Usuario no encontrado.' });
     }
 
-    const valid = await bcrypt.compare(currentPassword, result.recordset[0].PSW_HSH);
-    if (!valid) {
-      return res.status(400).json({ status: 'error', error: 'La contraseña actual es incorrecta.' });
+    const userDB = result.recordset[0];
+    const esGoogleAuth = userDB.PSW_HSH === 'GOOGLE_AUTH';
+
+    if (!esGoogleAuth) {
+      if (!currentPassword) {
+        return res.status(400).json({ status: 'error', error: 'La contraseña actual es obligatoria.' });
+      }
+      const valid = await bcrypt.compare(currentPassword, userDB.PSW_HSH);
+      if (!valid) {
+        return res.status(400).json({ status: 'error', error: 'La contraseña actual es incorrecta.' });
+      }
     }
 
     const salt = await bcrypt.genSalt(10);
@@ -571,7 +579,11 @@ const cambiarContrasena = async (req, res, appPool) => {
       .input('password', sql.VarChar(100), hashed)
       .query('UPDATE USUARIOS SET PSW_HSH = @password WHERE ID_USER = @id_user');
 
-    res.status(200).json({ status: 'success', mensaje: 'Contraseña actualizada correctamente.' });
+    const mensaje = esGoogleAuth
+      ? 'Contraseña establecida correctamente. Ya puedes iniciar sesión con tu nueva contraseña.'
+      : 'Contraseña actualizada correctamente.';
+
+    res.status(200).json({ status: 'success', mensaje, esPrimeraVez: esGoogleAuth });
   } catch (error) {
     console.error('Error en cambiarContrasena:', error);
     res.status(500).json({ status: 'error', error: 'Error al cambiar la contraseña.' });
