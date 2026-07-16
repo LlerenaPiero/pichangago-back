@@ -303,20 +303,65 @@ Cambiar o establecer contraseña. **Se comporta diferente según el tipo de usua
 
 #### Instrucciones para el frontend:
 
-1. **Obtener el perfil del usuario** (`GET /api/jugador/perfil`) para saber si es cuenta Google.
-   - El endpoint `GET /api/jugador/perfil` devuelve un campo `esGoogleAuth: true/false`.
-   - Si el frontend no tiene este campo, puede detectarlo si el usuario se logueó con Google (guardar el método de login al iniciar sesión).
+1. **Detectar si es cuenta Google** — al hacer login, guardar el método (`'google'` o `'email'`).
+2. **Si es Google:** mostrar formulario como "Establecer contraseña", sin campo `currentPassword`.
+3. **Si es normal:** mostrar formulario como "Cambiar contraseña", con `currentPassword` + `newPassword` + `confirmNewPassword`.
 
-2. **Si el usuario es de Google:**
-   - Mostrar el formulario como **"Establecer contraseña"** en vez de "Cambiar contraseña".
-   - No pedir `currentPassword`.
-   - Botón con texto: "Establecer contraseña".
-   - Mensaje de éxito: "Contraseña establecida correctamente".
+---
 
-3. **Si el usuario es normal:**
-   - Mostrar formulario como **"Cambiar contraseña"**.
-   - Pedir `currentPassword` + `newPassword` + `confirmNewPassword`.
-   - Botón con texto: "Cambiar contraseña".
+## Google Sign-In — Inicialización (GIS)
+
+El error `google.accounts.id.initialize() is called multiple times` y el `The given origin is not allowed for the given client ID` son **del frontend**. El backend recibe el `idToken` y responde OK.
+
+**Problema:** El frontend llama `google.accounts.id.initialize()` múltiples veces (cada llamada pisa la anterior y deja parámetros como `undefined`).
+
+**Solución en el frontend:**
+
+```javascript
+// ✅ CORRECTO — inicializar UNA SOLA VEZ
+let gsiInitialized = false;
+
+function initGoogleSignIn() {
+  if (gsiInitialized) return;
+  gsiInitialized = true;
+
+  google.accounts.id.initialize({
+    client_id: '114641106525-...apps.googleusercontent.com',
+    callback: handleGoogleCredentialResponse
+  });
+
+  google.accounts.id.renderButton(
+    document.getElementById('googleButton'),
+    { theme: 'outline', size: 'large', text: 'signin_with' }
+  );
+}
+```
+
+**Reglas:**
+1. Llamar `google.accounts.id.initialize()` **una sola vez** en toda la vida de la app.
+2. No llamarlo dentro de efectos que se ejecuten múltiples veces (como `useEffect` sin dependencias o en cada render).
+3. Si el componente de login se monta/desmonta, usar un flag para no reinicializar.
+4. `google.accounts.id.cancel()` al desmontar si usás One Tap, pero no antes de renderizar el botón.
+
+**Ejemplo en React:**
+```javascript
+// ✅ GUARDAR REFERENCIA CON useRef
+const initialized = useRef(false);
+
+useEffect(() => {
+  if (initialized.current) return;
+  initialized.current = true;
+
+  google.accounts.id.initialize({
+    client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
+    callback: (response) => {
+      // Enviar response.credential al backend POST /api/auth/google
+    }
+  });
+}, []);
+```
+
+**En Vite**, el Client ID debe estar en `VITE_GOOGLE_CLIENT_ID` (con prefijo `VITE_`), no en `.env` normal.
 
 ---
 
