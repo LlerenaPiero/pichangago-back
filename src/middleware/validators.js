@@ -29,7 +29,7 @@ const registerRules = [
     .isLength({ max: 50 }).withMessage('El apellido no puede exceder 50 caracteres.')
     .matches(/^[a-zA-ZáéíóúñÑ\s]+$/).withMessage('El apellido solo puede contener letras y espacios.'),
   body('rol')
-    .trim().toUpperCase().isIn(['DUENO', 'DUEÑO', 'JUGADOR']).withMessage('Rol debe ser DUENO o JUGADOR.'),
+    .trim().toUpperCase().isIn(['DUENO', 'DUEÑO', 'JUGADOR', 'CLIENTE']).withMessage('Rol debe ser DUENO o JUGADOR.'),
   body('telefono')
     .optional({ values: 'falsy' }).trim()
     .matches(/^\d{9}$/).withMessage('El teléfono debe tener exactamente 9 dígitos.'),

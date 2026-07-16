@@ -180,8 +180,8 @@ app.post('/api/register', registerLimiter, registerRules, async (req, res) => {
         .input('psw_hsh', sql.VarChar(100), passwordHash)
         .input('nombre', sql.VarChar(50), nombre)
         .input('apellido', sql.VarChar(50), apellido)
-        .input('rol', sql.VarChar(20), rol)
-        .input('telefono', sql.VarChar(12), telefono || null)
+        .input('rol', sql.VarChar(20), rolBD)
+        .input('telefono', sql.VarChar(12), telefono ? String(telefono).trim() : null)
         .input('estado', sql.VarChar(20), 'ACTIVO')
         .input('fecha_crea', sql.Date, new Date())
         .input('token_version', sql.Int, 1)
@@ -190,8 +190,9 @@ app.post('/api/register', registerLimiter, registerRules, async (req, res) => {
           VALUES (@id_user, @email, @psw_hsh, @nombre, @apellido, @rol, @estado, @telefono, @fecha_crea, @token_version)
         `);
 
-      // 5. Normalizar el rol para aceptar 'DUEÑO' y 'DUENO' (Evita el choque con la eñe del Front)
+      // 5. Normalizar el rol: JUGADOR/CLIENTE → CLIENTE, DUEÑO/DUENO → DUENO
       const rolLimpio = rol ? rol.toUpperCase().trim() : '';
+      const rolBD = (rolLimpio === 'DUEÑO' || rolLimpio === 'DUENO') ? 'DUENO' : 'CLIENTE';
       
       if (rolLimpio === 'DUEÑO' || rolLimpio === 'DUENO') {
   const idDueno = `DUE-${Math.floor(100000 + Math.random() * 900000)}`;
