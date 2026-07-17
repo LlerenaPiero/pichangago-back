@@ -34,7 +34,7 @@ const refreshLimiter = rateLimit({
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 100,
+  max: parseInt(process.env.RATE_LIMIT_MAX) || 100,
   standardHeaders: true,
   legacyHeaders: false,
   message: { status: 'error', error: 'Demasiadas solicitudes. Intenta de nuevo.' }

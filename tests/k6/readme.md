@@ -2,6 +2,16 @@
 
 Buscamos el **punto de quiebre** del backend. Empezamos con pocos usuarios y subimos hasta que fallen los thresholds.
 
+## ⚠️ Requisito antes de testear
+
+El backend tiene un rate limiter global de **100 req/min** (`security.js`). Para que k6 funcione correctamente, hay que aumentarlo:
+
+**En Render:** Agregar variable de entorno `RATE_LIMIT_MAX=2000` en el dashboard.
+
+**Local:** Agregar `RATE_LIMIT_MAX=2000` en tu `.env` y reiniciar.
+
+Si no se aumenta, el rate limiter bloqueará las requests y k6 reportará ~22% de fallos incluso con 5 VUs.
+
 ## Instalación
 
 ```bash
