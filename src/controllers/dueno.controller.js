@@ -788,19 +788,25 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
 
             for (const item of horarios) {
                 const idHorario = `HOR-${Math.floor(100000 + Math.random() * 900000)}`;
-                
+                const tipoPrecioDb = mapTipoPrecioToDB(item.tipoPrecio);
+
                 await new sql.Request(transaction)
                     .input('id_horario', sql.Char(10), idHorario)
                     .input('id_cancha', sql.Char(10), idCancha)
                     .input('id_dueño', sql.Char(10), idDueno)
-                    .input('dia_semana', sql.Int, item.diaSemana) 
+                    .input('dia_semana', sql.Int, item.diaSemana)
                     .input('hora_inicio', sql.VarChar(5), item.horaInicio)
                     .input('hora_fin', sql.VarChar(5), item.horaFin)
-                    .input('tipo_precio', sql.VarChar(20), mapTipoPrecioToDB(item.tipoPrecio)) 
+                    .input('tipo_precio', sql.VarChar(20), tipoPrecioDb)
                     .input('estado', sql.VarChar(20), 'ACTIVO')
                     .query(`
-                        INSERT INTO HORARIOS (ID_HORARIO, ID_CANCHA, ID_DUENO, DIA_SEMANA, HORA_INICIO, HORA_FIN, TIPO_PRECIO, ESTADO)
-                        VALUES (@id_horario, @id_cancha, @id_dueño, @dia_semana, @hora_inicio, @hora_fin, @tipo_precio, @estado)
+                        IF EXISTS (SELECT 1 FROM HORARIOS WHERE ID_CANCHA = @id_cancha AND DIA_SEMANA = @dia_semana AND HORA_INICIO = @hora_inicio)
+                            UPDATE HORARIOS
+                            SET HORA_FIN = @hora_fin, TIPO_PRECIO = @tipo_precio, ESTADO = @estado
+                            WHERE ID_CANCHA = @id_cancha AND DIA_SEMANA = @dia_semana AND HORA_INICIO = @hora_inicio
+                        ELSE
+                            INSERT INTO HORARIOS (ID_HORARIO, ID_CANCHA, ID_DUENO, DIA_SEMANA, HORA_INICIO, HORA_FIN, TIPO_PRECIO, ESTADO)
+                            VALUES (@id_horario, @id_cancha, @id_dueño, @dia_semana, @hora_inicio, @hora_fin, @tipo_precio, @estado)
                     `);
             }
 
@@ -835,7 +841,7 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
                     INNER JOIN CANCHAS c ON h.ID_CANCHA = c.ID_CANCHA
                     CROSS JOIN fechas f
                     WHERE h.ID_CANCHA = @id_cancha
-                      AND (DATEPART(WEEKDAY, f.fecha) + @@DATEFIRST - 1) % 7 = h.DIA_SEMANA
+                      AND ((DATEPART(WEEKDAY, f.fecha) + @@DATEFIRST - 2) % 7) + 1 = h.DIA_SEMANA
                       AND NOT EXISTS (
                           SELECT 1 FROM SLOTS s
                           WHERE s.ID_CANCHA = @id_cancha
@@ -1124,6 +1130,7 @@ const crearOfertaSlot = async (req, res, appPool) => {
         try {
             await new sql.Request(transaction)
                 .input('id_oferta', sql.Char(10), idOferta)
+                .input('id_slot', sql.Char(10), idSlot)
                 .input('id_cancha', sql.Char(10), idCancha)
                 .input('id_dueño', sql.Char(10), idDueno)
                 .input('porcentaje_desc', sql.Int, parseInt(porcentajeDescuento))
@@ -1284,7 +1291,7 @@ const generarSlots = async (req, res, appPool) => {
                 INNER JOIN CANCHAS c ON h.ID_CANCHA = c.ID_CANCHA
                 CROSS JOIN fechas f
                 WHERE h.ID_CANCHA = @id_cancha
-                  AND (DATEPART(WEEKDAY, f.fecha) + @@DATEFIRST - 1) % 7 = h.DIA_SEMANA
+                  AND ((DATEPART(WEEKDAY, f.fecha) + @@DATEFIRST - 2) % 7) + 1 = h.DIA_SEMANA
                   AND NOT EXISTS (
                       SELECT 1 FROM SLOTS s
                       WHERE s.ID_CANCHA = @id_cancha

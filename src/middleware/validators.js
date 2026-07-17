@@ -138,7 +138,7 @@ const horarioRules = [
   body('horarios')
     .isArray({ min: 1 }).withMessage('Debe enviar una lista de horarios.'),
   body('horarios.*.diaSemana')
-    .isInt({ min: 0, max: 6 }).withMessage('diaSemana debe ser 0-6.'),
+    .isInt({ min: 1, max: 7 }).withMessage('diaSemana debe ser 1-7 (1=Lun...7=Dom).'),
   body('horarios.*.horaInicio')
     .matches(/^([01]\d|2[0-3]):([03]0|00)$/).withMessage('horaInicio debe ser HH:00 o HH:30.'),
   body('horarios.*.horaFin')
