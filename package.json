@@ -9,7 +9,12 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "k6:dashboard": "k6 run tests/k6/dueno-dashboard.js",
+    "k6:dashboard:prod": "k6 run -e BASE_URL=https://pichangago-back.onrender.com tests/k6/dueno-dashboard.js",
+    "k6:dashboard:export": "k6 run --summary-export evidencias/04-k6/dueno-dashboard-summary.json tests/k6/dueno-dashboard.js",
+    "k6:reservas": "k6 run tests/k6/concurrencia-reservas.js",
+    "k6:reservas:prod": "k6 run -e BASE_URL=https://pichangago-back.onrender.com tests/k6/concurrencia-reservas.js"
   },
   "keywords": [],
   "author": "",
