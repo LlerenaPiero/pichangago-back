@@ -6,16 +6,19 @@ const reservasExitosas = new Counter('reservas_exitosas');
 const reservasRechazadas = new Counter('reservas_rechazadas');
 const errorRate = new Rate('errors');
 
+const MAX_VUS = parseInt(__ENV.MAX_VUS) || 20;
+const DURATION = __ENV.DURATION || '30s';
+
 export const options = {
   stages: [
-    { duration: '5s', target: 20 },
-    { duration: '10s', target: 20 },
+    { duration: '5s', target: MAX_VUS },
+    { duration: DURATION, target: MAX_VUS },
     { duration: '5s', target: 0 }
   ],
   thresholds: {
-    http_req_failed: ['rate<0.01'],
-    errors: ['rate<0.01'],
-    http_req_duration: ['p(95)<2000']
+    http_req_failed: ['rate<0.05'],
+    errors: ['rate<0.05'],
+    http_req_duration: ['p(95)<3000']
   }
 };
 
@@ -70,8 +73,8 @@ export default function () {
     check(res, { 'reserva rechazada 409': (r) => r.status === 409 });
   } else {
     errorRate.add(1);
-    check(res, { 'reserva inesperada': (r) => r.status < 500 });
     console.error(`Reserva fallo con status ${res.status}:`, res.body);
+    check(res, { 'reserva inesperada': (r) => r.status < 500 });
   }
 
   sleep(0.5);

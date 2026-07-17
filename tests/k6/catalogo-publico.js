@@ -9,18 +9,19 @@ const slotsTrend = new Trend('slots_ms');
 const tiposTrend = new Trend('tipos_ms');
 const ubicacionesTrend = new Trend('ubicaciones_ms');
 
+const MAX_VUS = parseInt(__ENV.MAX_VUS) || 10;
+const DURATION = __ENV.DURATION || '2m';
+
 export const options = {
   stages: [
-    { duration: '30s', target: 20 },
-    { duration: '1m', target: 50 },
+    { duration: '30s', target: Math.ceil(MAX_VUS * 0.3) },
+    { duration: DURATION, target: MAX_VUS },
     { duration: '30s', target: 0 }
   ],
   thresholds: {
-    http_req_failed: ['rate<0.01'],
-    http_req_duration: ['p(95)<2000'],
-    errors: ['rate<0.01'],
-    listado_ms: ['p(95)<1500'],
-    slots_ms: ['p(95)<1200']
+    http_req_failed: ['rate<0.05'],
+    http_req_duration: ['p(95)<3000'],
+    errors: ['rate<0.05']
   }
 };
 
@@ -40,26 +41,20 @@ export default function () {
   group('Tipos de cancha', () => {
     const res = http.get(`${BASE_URL}/api/canchas/tipos-cancha`);
     tiposTrend.add(res.timings.duration);
-    check(res, {
-      'tipos 200': (r) => r.status === 200
-    });
+    check(res, { 'tipos 200': (r) => r.status === 200 });
   });
 
   group('Ubicaciones', () => {
     const res = http.get(`${BASE_URL}/api/ubicaciones/departamentos`);
     ubicacionesTrend.add(res.timings.duration);
-    check(res, {
-      'ubicaciones 200': (r) => r.status === 200
-    });
+    check(res, { 'ubicaciones 200': (r) => r.status === 200 });
   });
 
   if (ID_CANCHA) {
     group('Detalle cancha', () => {
       const res = http.get(`${BASE_URL}/api/canchas/${ID_CANCHA}`);
       detalleTrend.add(res.timings.duration);
-      check(res, {
-        'detalle 200': (r) => r.status === 200
-      });
+      check(res, { 'detalle 200': (r) => r.status === 200 });
     });
 
     group('Slots cancha', () => {

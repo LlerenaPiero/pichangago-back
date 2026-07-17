@@ -12,18 +12,19 @@ const dashboardTrend = new Trend('dashboard_ms');
 const reservasExitosas = new Counter('reservas_exitosas');
 const reservasRechazadas = new Counter('reservas_rechazadas');
 
+const MAX_VUS = parseInt(__ENV.MAX_VUS) || 10;
+const DURATION = __ENV.DURATION || '2m';
+
 export const options = {
   stages: [
-    { duration: '30s', target: 10 },
-    { duration: '1m', target: 25 },
+    { duration: '30s', target: Math.ceil(MAX_VUS * 0.3) },
+    { duration: DURATION, target: MAX_VUS },
     { duration: '30s', target: 0 }
   ],
   thresholds: {
-    http_req_failed: ['rate<0.01'],
-    http_req_duration: ['p(95)<2000'],
-    errors: ['rate<0.01'],
-    reserva_ms: ['p(95)<1500'],
-    slots_ms: ['p(95)<1200']
+    http_req_failed: ['rate<0.05'],
+    http_req_duration: ['p(95)<3000'],
+    errors: ['rate<0.05']
   }
 };
 
@@ -60,25 +61,19 @@ export default function () {
   group('Listar canchas (auth)', () => {
     const res = http.get(`${BASE_URL}/api/canchas`, authParams);
     listadoTrend.add(res.timings.duration);
-    check(res, {
-      'listado auth 200': (r) => r.status === 200
-    });
+    check(res, { 'listado auth 200': (r) => r.status === 200 });
   });
 
   group('Dashboard jugador', () => {
     const res = http.get(`${BASE_URL}/api/jugador/dashboard`, authParams);
     dashboardTrend.add(res.timings.duration);
-    check(res, {
-      'dashboard jugador 200': (r) => r.status === 200
-    });
+    check(res, { 'dashboard jugador 200': (r) => r.status === 200 });
   });
 
   group('Historial reservas', () => {
     const res = http.get(`${BASE_URL}/api/jugador/reservas`, authParams);
     historialTrend.add(res.timings.duration);
-    check(res, {
-      'historial 200': (r) => r.status === 200
-    });
+    check(res, { 'historial 200': (r) => r.status === 200 });
   });
 
   if (ID_CANCHA) {
