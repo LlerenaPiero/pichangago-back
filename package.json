@@ -18,7 +18,8 @@
     "k6:catalogo": "k6 run tests/k6/catalogo-publico.js",
     "k6:catalogo:prod": "k6 run -e BASE_URL=https://pichangago-back.onrender.com tests/k6/catalogo-publico.js",
     "k6:jugador": "k6 run tests/k6/jugador-flujo-completo.js",
-    "k6:jugador:prod": "k6 run -e BASE_URL=https://pichangago-back.onrender.com tests/k6/jugador-flujo-completo.js"
+    "k6:jugador:prod": "k6 run -e BASE_URL=https://pichangago-back.onrender.com tests/k6/jugador-flujo-completo.js",
+    "sonar": "sonar-scanner -Dsonar.login=7bd693df222fea0656c291bacc28d751e2185395 -Dsonar.host.url=https://sonarcloud.io -Dsonar.organization=pichangago"
   },
   "keywords": [],
   "author": "",
@@ -42,5 +43,8 @@
     "pdfkit": "^0.19.1",
     "react-google-login": "^5.2.2",
     "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "sonar-scanner": "^3.1.0"
   }
 }
