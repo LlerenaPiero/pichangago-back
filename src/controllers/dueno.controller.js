@@ -777,6 +777,7 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
                     DELETE FROM SLOTS
                     WHERE ID_HORARIO IN (SELECT ID_HORARIO FROM HORARIOS WHERE ID_CANCHA = @id_cancha)
                       AND ESTADO NOT IN ('RESERVADO', 'NO_ASISTIO')
+                      AND ID_SLOT NOT IN (SELECT ID_SLOT FROM RESERVAS WHERE ID_SLOT IS NOT NULL)
                 `);
             await new sql.Request(transaction)
                 .input('id_cancha', sql.Char(10), idCancha)
@@ -1147,8 +1148,7 @@ const crearOfertaSlot = async (req, res, appPool) => {
             // Cambiamos el estado del slot para que el catálogo del Front lo pinte en ámbar/oferta
             await new sql.Request(transaction)
                 .input('id_slot', sql.Char(10), idSlot)
-                .input('fecha_expira', sql.DateTime, fechaExpira ? new Date(fechaExpira) : new Date(Date.now() + 86400000))
-                .query("UPDATE SLOTS SET ESTADO = 'OFERTA', FECHA_EXPIRA = @fecha_expira WHERE ID_SLOT = @id_slot");
+                .query("UPDATE SLOTS SET ESTADO = 'OFERTA' WHERE ID_SLOT = @id_slot");
 
             await transaction.commit();
             res.status(201).json({ status: 'success', mensaje: '🔥 ¡Oferta relámpago publicada en el catálogo!', idOferta });
@@ -1262,7 +1262,8 @@ const generarSlots = async (req, res, appPool) => {
                 DELETE FROM SLOTS
                 WHERE ID_HORARIO IN (SELECT ID_HORARIO FROM HORARIOS WHERE ID_CANCHA = @id_cancha)
                   AND ESTADO NOT IN ('RESERVADO', 'NO_ASISTIO')
-                  AND FECHA >= CAST(GETDATE() AS DATE);
+                  AND FECHA >= CAST(GETDATE() AS DATE)
+                  AND ID_SLOT NOT IN (SELECT ID_SLOT FROM RESERVAS WHERE ID_SLOT IS NOT NULL);
 
                 DECLARE @contSlot INT;
                 SELECT @contSlot = ISNULL(MAX(CONVERT(INT, RIGHT(ID_SLOT, 6))), 0) FROM SLOTS;
