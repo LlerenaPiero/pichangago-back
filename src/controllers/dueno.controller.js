@@ -770,7 +770,9 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
         await transaction.begin();
 
         try {
-            // Eliminar horarios anteriores (solo slots disponibles, mantener reservas)
+            const paso = (nombre) => console.log(`[configurarHorariosTarifas] Paso: ${nombre}`);
+
+            paso('1: DELETE SLOTS');
             await new sql.Request(transaction)
                 .input('id_cancha', sql.Char(10), idCancha)
                 .query(`
@@ -779,6 +781,8 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
                       AND ESTADO NOT IN ('RESERVADO', 'NO_ASISTIO')
                       AND ID_SLOT NOT IN (SELECT ID_SLOT FROM RESERVAS WHERE ID_SLOT IS NOT NULL)
                 `);
+
+            paso('2: DELETE HORARIOS huerfanos');
             await new sql.Request(transaction)
                 .input('id_cancha', sql.Char(10), idCancha)
                 .query(`
@@ -787,6 +791,7 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
                       AND ID_HORARIO NOT IN (SELECT DISTINCT ID_HORARIO FROM SLOTS)
                 `);
 
+            paso('3: UPSERT horarios');
             for (const item of horarios) {
                 const idHorario = `HOR-${Math.floor(100000 + Math.random() * 900000)}`;
                 const tipoPrecioDb = mapTipoPrecioToDB(item.tipoPrecio);
@@ -811,7 +816,10 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
                     `);
             }
 
-            await new sql.Request(transaction)
+            paso('4: Generar slots');
+            const slotRequest = new sql.Request(transaction);
+            slotRequest.timeout = 120000;
+            slotRequest
                 .input('id_cancha', sql.Char(10), idCancha)
                 .input('id_dueño', sql.Char(10), idDueno)
                 .query(`
@@ -841,31 +849,30 @@ const configurarHorariosTarifas = async (req, res, appPool) => {
                     FROM HORARIOS h
                     INNER JOIN CANCHAS c ON h.ID_CANCHA = c.ID_CANCHA
                     CROSS JOIN fechas f
+                    LEFT JOIN SLOTS s ON s.ID_CANCHA = @id_cancha
+                        AND s.FECHA = f.fecha
+                        AND s.HORA_INICIO = h.HORA_INICIO
+                        AND s.ESTADO IN ('RESERVADO', 'NO_ASISTIO')
                     WHERE h.ID_CANCHA = @id_cancha
                       AND ((DATEPART(WEEKDAY, f.fecha) + @@DATEFIRST - 2) % 7) + 1 = h.DIA_SEMANA
-                      AND NOT EXISTS (
-                          SELECT 1 FROM SLOTS s
-                          WHERE s.ID_CANCHA = @id_cancha
-                            AND s.FECHA = f.fecha
-                            AND s.HORA_INICIO = h.HORA_INICIO
-                            AND s.ESTADO IN ('RESERVADO', 'NO_ASISTIO')
-                      )
+                      AND s.ID_SLOT IS NULL
                     OPTION (MAXRECURSION 365);
 
                     UPDATE CANCHAS SET ESTADO = 'DISPONIBLE' WHERE ID_CANCHA = @id_cancha AND ID_DUENO = @id_dueño;
                 `);
 
+            paso('5: COMMIT');
             await transaction.commit();
             res.status(201).json({ status: 'success', mensaje: 'Cronograma de horarios y tarifas inyectado con éxito.' });
 
         } catch (errorTransaccion) {
-            await transaction.rollback();
+            try { await transaction.rollback(); } catch (_) { console.error('Rollback fallo:', _); }
             throw errorTransaccion;
         }
 
     } catch (error) {
         console.error('🚨 Error al configurar horarios:', error);
-        res.status(500).json({ status: 'error', error: 'Error interno al procesar el cronograma.' });
+        res.status(500).json({ status: 'error', error: error.message || 'Error interno al procesar el cronograma.' });
     }
 };
 
@@ -1255,7 +1262,9 @@ const generarSlots = async (req, res, appPool) => {
             return res.status(400).json({ status: 'error', error: 'No hay horarios activos para esta cancha. Configura horarios primero.' });
         }
 
-        const result = await new sql.Request(appPool)
+        const slotGenRequest = new sql.Request(appPool);
+        slotGenRequest.timeout = 120000;
+        const result = await slotGenRequest
             .input('id_cancha', sql.Char(10), idCancha)
             .input('id_dueño', sql.Char(10), idDueno)
             .query(`
@@ -1291,15 +1300,13 @@ const generarSlots = async (req, res, appPool) => {
                 FROM HORARIOS h
                 INNER JOIN CANCHAS c ON h.ID_CANCHA = c.ID_CANCHA
                 CROSS JOIN fechas f
+                LEFT JOIN SLOTS s ON s.ID_CANCHA = @id_cancha
+                    AND s.FECHA = f.fecha
+                    AND s.HORA_INICIO = h.HORA_INICIO
+                    AND s.ESTADO IN ('RESERVADO', 'NO_ASISTIO')
                 WHERE h.ID_CANCHA = @id_cancha
                   AND ((DATEPART(WEEKDAY, f.fecha) + @@DATEFIRST - 2) % 7) + 1 = h.DIA_SEMANA
-                  AND NOT EXISTS (
-                      SELECT 1 FROM SLOTS s
-                      WHERE s.ID_CANCHA = @id_cancha
-                        AND s.FECHA = f.fecha
-                        AND s.HORA_INICIO = h.HORA_INICIO
-                        AND s.ESTADO IN ('RESERVADO', 'NO_ASISTIO')
-                  )
+                  AND s.ID_SLOT IS NULL
                 OPTION (MAXRECURSION 365);
 
                 SELECT @@ROWCOUNT AS generados;
