@@ -503,6 +503,7 @@ app.post('/api/logout', async (req, res) => {
       await appPool.request()
         .input('id', sql.Char(10), decoded.id)
         .query('UPDATE USUARIOS SET TOKEN_VERSION = ISNULL(TOKEN_VERSION, 1) + 1 WHERE ID_USER = @id');
+      io.to(`usuario:${decoded.id}`).emit('sesion:cerrada', { mensaje: 'Sesión cerrada en otro dispositivo o pestaña.' });
     } catch (e) { }
   }
   res.status(200).json({ status: 'success', mensaje: 'Global Logout aplicado.' });
@@ -658,10 +659,14 @@ app.post('/api/canchas/reservar', verificarToken, async (req, res) => {
 
     const canchaRes = await appPool.request()
       .input('id_cancha', sql.Char(10), idCancha)
-      .query('SELECT ID_DUENO, PRECIO_BASE, NOMBRE FROM CANCHAS WHERE ID_CANCHA = @id_cancha');
+      .query("SELECT ID_DUENO, PRECIO_BASE, NOMBRE, ESTADO FROM CANCHAS WHERE ID_CANCHA = @id_cancha");
 
     if (canchaRes.recordset.length === 0) {
       return res.status(404).json({ status: 'error', error: 'La cancha deportiva seleccionada no existe.' });
+    }
+
+    if (canchaRes.recordset[0].ESTADO !== 'DISPONIBLE') {
+      return res.status(409).json({ status: 'error', error: 'La cancha no está disponible en este momento (mantenimiento o inactiva).' });
     }
 
     const idDueno = canchaRes.recordset[0].ID_DUENO;
@@ -721,12 +726,32 @@ app.post('/api/canchas/reservar', verificarToken, async (req, res) => {
       `);
 
       for (const idSlot of slots) {
-        await new sql.Request(transaction)
+        const slotUpdate = await new sql.Request(transaction)
           .input('id_slot', sql.Char(10), idSlot)
-          .query("UPDATE SLOTS SET ESTADO = 'RESERVADO' WHERE ID_SLOT = @id_slot");
+          .query("UPDATE SLOTS SET ESTADO = 'RESERVADO' WHERE ID_SLOT = @id_slot AND ESTADO IN ('DISPONIBLE', 'OFERTA')");
+
+        if (slotUpdate.rowsAffected[0] === 0) {
+          throw new Error('SLOT_NO_DISPONIBLE');
+        }
       }
 
       await transaction.commit();
+
+      // Notificar en tiempo real vía Socket.IO
+      try {
+        io.to(`dueño:${idDueno}`).emit('reserva:nueva', {
+          idReserva, idCancha, canchaNombre, idUser,
+          jugadorNombre: req.user.nombre,
+          slots: slots.length,
+          fecha: new Date().toISOString()
+        });
+        io.to(`cancha:${idCancha}`).emit('slot:actualizado', {
+          slotsReservados: slots,
+          fecha: new Date().toISOString()
+        });
+      } catch (e) {
+        console.error('⚠️ Error al emitir Socket.IO:', e.message);
+      }
 
       // Enviar emails en segundo plano (no bloquean la respuesta)
       Promise.all([
@@ -839,10 +864,28 @@ io.use(async (socket, next) => {
 });
 
 io.on('connection', (socket) => {
-  console.log(`🔌 Socket conectado: ${socket.user.nombre} (${socket.user.id})`);
-  socket.join(`dueño:${socket.user.id}`);
+  const userId = socket.user.id;
+  console.log(`🔌 Socket conectado: ${socket.user.nombre} (${userId})`);
+
+  socket.join(`usuario:${userId}`);
+  if (socket.user.rol === 'DUENO') {
+    socket.join(`dueño:${userId}`);
+  }
+
+  socket.on('unirse:cancha', (data) => {
+    if (data?.idCancha) {
+      socket.join(`cancha:${data.idCancha}`);
+    }
+  });
+
+  socket.on('salir:cancha', (data) => {
+    if (data?.idCancha) {
+      socket.leave(`cancha:${data.idCancha}`);
+    }
+  });
+
   socket.on('disconnect', () => {
-    console.log(`🔌 Socket desconectado: ${socket.user.nombre}`);
+    console.log(`🔌 Socket desconectado: ${socket.user.nombre} (${userId})`);
   });
 });
 

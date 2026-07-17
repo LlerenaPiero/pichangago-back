@@ -580,6 +580,15 @@ const cambiarEstadoCancha = async (req, res, appPool) => {
             return res.status(404).json({ status: 'error', error: 'Cancha no encontrada o no pertenece al dueño.' });
         }
 
+        try {
+            const io = req.app.get('io');
+            if (io) {
+                io.to(`cancha:${idCancha}`).emit('cancha:estado', { idCancha, estado });
+            }
+        } catch (e) {
+            console.error('⚠️ Error al emitir Socket.IO en cambiarEstadoCancha:', e.message);
+        }
+
         res.status(200).json({ status: 'success', mensaje: `Cancha cambiada a estado: ${estado}.` });
     } catch (error) {
         console.error('🚨 Error en cambiarEstadoCancha:', error);

@@ -1,388 +1,248 @@
-# Instructivo para el Frontend — Flujo de Autenticación
-
-## Base URL
-
-```
-Local:      http://localhost:5000
-Producción: https://pichangago-back.onrender.com
-```
-
-## Flujo de Registro y Verificación
-
-```
-Registro → Email de verificación → Click en link → Redirección al frontend → Login
-```
-
-### 1. `POST /api/register`
-
-Crea el usuario con `EMAIL_VERIFICADO = 0`. **No permite iniciar sesión** hasta verificar el correo.
-
-**Body:**
-```json
-{
-  "email": "user@example.com",
-  "password": "123456",
-  "nombre": "Juan",
-  "apellido": "Pérez",
-  "rol": "JUGADOR",
-  "telefono": "999888777"
-}
-```
-
-**Roles válidos:** `DUENO`, `DUEÑO`, `JUGADOR`, `CLIENTE` (todos se normalizan internamente: `JUGADOR`/`CLIENTE` → `CLIENTE`, `DUENO`/`DUEÑO` → `DUENO`)
-
-**Response 201:**
-```json
-{
-  "status": "success",
-  "mensaje": "Te enviamos un correo de confirmación. Revisa tu bandeja de entrada.",
-  "userId": "USR-123456",
-  "requiresLocal": false,
-  "emailVerificado": false
-}
-```
-
-El sistema envía automáticamente un email con un link de verificación.
+# Instructivo — Mejoras de seguridad, tiempo real y concurrencia
 
 ---
 
-### 2. Link de verificación (GET)
+## 1. Política de contraseñas
 
-El usuario recibe un email con un link tipo:
+### Estado actual
+- El frontend ya valida en registro: mínimo 8 caracteres, 1 mayúscula, 1 minúscula, 1 número, 1 carácter especial.
+- Muestra barra de fortaleza y lista de requisitos en tiempo real.
+- Bloquea el envío si no cumple.
+
+### Lo que debe hacer el backend
+
+#### 1.1 Validación server-side en `POST /api/register`
+Rechazar con `400 Bad Request` si la contraseña no cumple:
+
+```regex
+^.{8,}$           -> mínimo 8 caracteres
+[A-Z]             -> al menos una mayúscula
+[a-z]             -> al menos una minúscula
+[0-9]             -> al menos un número
+[^A-Za-z0-9]      -> al menos un carácter especial
 ```
-https://pichangago-back.onrender.com/api/verify-email?token=eyJhbG...
-```
-
-El backend procesa el token y **redirige** al frontend a la ruta:
 
 ```
-{FRONTEND_URL}/email-verificado?status=success
-{FRONTEND_URL}/email-verificado?status=error&reason=expired
+HTTP 400
+{ "error": "La contraseña debe tener mínimo 8 caracteres, una mayúscula, una minúscula, un número y un carácter especial" }
 ```
 
-**Posibles valores de `reason`:**
-| reason | Significado |
-|--------|-------------|
-| `missing_token` | No se envió token |
-| `user_not_found` | Usuario no existe |
-| `invalid_token` | Token inválido |
-| `expired` | Token expirado (24h) |
-| `invalid` | Token corrupto |
+#### 1.2 Validación en `POST /api/cambiar-contrasena`
+Aplicar las mismas reglas al cambiar/establecer contraseña.
 
-**El frontend DEBE tener una ruta `/email-verificado`** que lea los query params y muestre el mensaje correspondiente.
+#### 1.3 Prohibir contraseñas comunes
+Mantener un diccionario interno (top 10000 de HaveIBeenPwned o similar) y rechazar si la contraseña está en la lista.
 
-Después de verificar, el usuario recibe automáticamente el **email de bienvenida**.
+#### 1.4 Historial de contraseñas
+No permitir reutilizar las últimas N contraseñas (N=5 recomendado). Guardar hashes anteriores en tabla `password_history`.
+
+#### 1.5 Bloqueo por intentos fallidos (ya implementado)
+- 3 intentos fallidos → bloqueo temporal (15 min).
+- El frontend ya maneja `403` en login.
+
+#### 1.6 Hash de contraseñas
+Usar bcrypt con costo 12+.
 
 ---
 
-### 3. `POST /api/resend-verification`
+## 2. Cerrar sesión en todas las ventanas
 
-Reenviar el email de verificación (por ejemplo si expiró o no llegó).
+### Estado actual (frontend)
+- Se usa `BroadcastChannel` (API nativa del navegador).
+- Al hacer logout en cualquier pestaña, se emite un mensaje `{ type: 'logout' }` que todas las demás pestañas escuchan y cierran sesión automáticamente.
+- El `authService.logout()` ya dispara `broadcastLogout()`.
+- `App.jsx` ya escucha con `listenAuthBroadcast`.
 
-**Body:**
-```json
-{
-  "email": "user@example.com"
-}
-```
+### Lo que debe hacer el backend
 
-**Rate limit:** 3 por hora
-**Response:** Siempre el mismo mensaje (exista o no el correo):
-```json
-{
-  "message": "Si el correo está registrado y no verificado, recibirás un nuevo enlace."
-}
-```
+#### 2.1 Invalidar refresh token en `POST /api/logout`
+- Marcar el `refreshToken` como revocado en la base de datos (o eliminarlo).
+- El frontend ya envía el `refreshToken` en el body.
+
+#### 2.2 Forzar re-login si el token fue invalidado
+- En `POST /api/refresh`, si el refresh token está revocado o no existe, responder `401` para forzar logout.
+- El frontend ya llama `authService.logout()` si `refreshAccessToken` falla.
+
+#### 2.3 Validación periódica de sesión (ya existe)
+- `GET /api/validate-session` — el frontend la llama cada 60 segundos.
+- Si responde `403`, el frontend cierra sesión automáticamente.
+- Útil para cuando el admin bloquea a un usuario.
 
 ---
 
-### 4. `POST /api/login`
+## 3. Tiempo real — WebSockets / SSE
 
-Si el email no está verificado, el login es rechazado.
+### Problema
+Un usuario ve una cancha y alguien más la reserva. El primero no se entera hasta que recarga la página. Lo mismo para el dueño que ve el dashboard de reservas.
 
-**Response 403 (email no verificado):**
+### Solución propuesta: WebSockets (Socket.IO)
+
+#### 3.1 Conexión
+El frontend se conecta al conectarse (usuario autenticado) y se desconecta al hacer logout.
+
+#### 3.2 Eventos que el backend debe emitir
+
+| Evento | Cuándo se emite | Quién lo recibe |
+|--------|----------------|-----------------|
+| `reserva:nueva` | Un usuario crea una reserva | Dueño de la cancha + cualquier cliente viendo `CanchaDetail` de esa cancha |
+| `reserva:cancelada` | Usuario o dueño cancela una reserva | Dueño + cliente que la reservó |
+| `cancha:mantenimiento` | Dueño activa/desactiva mantenimiento | Clientes viendo esa cancha o resultados de búsqueda |
+| `local:mantenimiento` | Dueño pone el local en mantenimiento | Clientes viendo cualquier cancha de ese local |
+| `usuario:bloqueado` | Admin bloquea a un usuario | Ese usuario (fuerza logout) |
+| `reserva:conflicto` | Intento de reserva duplicada | Usuario que intentó la segunda reserva (respuesta HTTP, no WS) |
+
+#### 3.3 Formato de mensaje sugerido
+
 ```json
 {
-  "status": "error",
-  "error": "Debes verificar tu correo electrónico primero. Revisa tu bandeja de entrada.",
-  "emailNoVerificado": true
-}
-```
-
-El frontend debe detectar `emailNoVerificado: true` y mostrar:
-- Mensaje: "Revisá tu correo para verificar tu cuenta"
-- Botón: "Reenviar correo" → llama a `POST /api/resend-verification`
-
-**Response 200 (éxito):**
-```json
-{
-  "status": "success",
-  "token": "eyJhbGciOiJI...",
-  "refreshToken": "eyJhbGciOiJI...",
-  "usuario": {
-    "id": "USR-999001",
-    "nombre": "Ricardo",
-    "rol": "DUENO"
+  "event": "reserva:nueva",
+  "data": {
+    "canchaId": "uuid",
+    "localSlug": "cancha-5",
+    "fecha": "2026-07-16",
+    "slots": ["18:00", "19:00"],
+    "action": "created" | "cancelled" | "maintenance_on" | "maintenance_off"
   }
 }
 ```
 
-**Bloqueo por intentos:** 3 intentos fallidos = 15 min de bloqueo.
+#### 3.4 Canales/Rooms
+- `cancha:{id}` — todos los que ven los detalles de esa cancha.
+- `local:{id}` — dueño del local (para recibir notificaciones de reservas).
+- `usuario:{id}` — notificaciones personales (bloqueo, cancelación).
 
 ---
 
-### 5. `POST /api/auth/google`
+## 4. Validación de disponibilidad en backend (concurrencia)
 
-Login o registro con Google.
+### 4.1 Mantenimiento de cancha / local
 
-**Body:**
+**Flujo al crear reserva (`POST /api/reservas`):**
+
+1. El backend recibe `{ canchaId, fecha, horaInicio, horaFin }`.
+2. Verificar si la cancha tiene `mantenimiento = true` → rechazar con `409 Conflict`.
+3. Verificar si el local asociado tiene `mantenimiento = true` → rechazar con `409 Conflict`.
+4. Si pasa, continuar con validación de cruce horario.
+
 ```json
-{
-  "idToken": "eyJhbGciOiJSUzI1NiIs..."
-}
+HTTP 409
+{ "error": "La cancha no está disponible (en mantenimiento)" }
 ```
 
-- Si el email **no existe**: crea usuario con `EMAIL_VERIFICADO = 1` (Google ya verificó), rol `CLIENTE`.
-- Si el email **ya existe**: inicia sesión. Si estaba sin verificar, lo marca como verificado.
-- **Response:** misma estructura que login.
+### 4.2 Prevenir reservas duplicadas / cruce horario
 
-**IMPORTANTE:** Los usuarios de Google tienen `PSW_HSH = 'GOOGLE_AUTH'` en la BD (no tienen contraseña). El flujo de cambio de contraseña debe adaptarse (ver punto 11).
+**Problema:**
+- Usuario A reserva cancha X de 6-7 y 7-8.
+- Usuario B reserva cancha X de 7-8.
+- Solo uno debe poder hacer la reserva.
+- El que primero completa el pago gana.
+
+**Solución: tres capas**
+
+#### Capa 1 — Validación en la aplicación (Node.js)
+```sql
+SELECT COUNT(*) FROM reservas
+WHERE cancha_id = :canchaId
+  AND fecha = :fecha
+  AND estado != 'cancelada'
+  AND (
+    (hora_inicio < :horaFin AND hora_fin > :horaInicio)
+  )
+```
+Si `COUNT > 0`, rechazar.
+
+#### Capa 2 — Lock a nivel de base de datos
+Usar `SELECT ... FOR UPDATE` (PostgreSQL row-level lock) dentro de una transacción:
+
+```sql
+BEGIN;
+SELECT id FROM canchas WHERE id = :canchaId FOR UPDATE;
+-- ahora verificamos cruces
+INSERT INTO reservas (...) VALUES (...);
+COMMIT;
+```
+
+#### Capa 3 — Restricción CHECK (opcional, redundante)
+```sql
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+ALTER TABLE reservas ADD CONSTRAINT no_overlap
+  EXCLUDE USING gist (
+    cancha_id WITH =,
+    daterange(fecha, fecha, '[]') WITH &&,
+    tsrange(hora_inicio, hora_fin) WITH &&
+  ) WHERE (estado != 'cancelada');
+```
+(O usar un enfoque más simple con una combinación de `UNIQUE` y validación manual.)
+
+### 4.3 Bloqueo optimista con versión
+Agregar columna `version` a la tabla `canchas`:
+
+```sql
+ALTER TABLE canchas ADD COLUMN version INTEGER DEFAULT 0;
+```
+
+Al crear reserva:
+```sql
+UPDATE canchas SET version = version + 1 WHERE id = :canchaId AND version = :oldVersion;
+-- Si filas afectadas === 0, otro usuario modificó la cancha (ej: puso en mantenimiento)
+```
+
+Esto evita el clásico problema de race condition donde dos reservas se procesan casi al mismo tiempo.
 
 ---
 
-### 6. `POST /api/forgot-password`
+## 5. Flujo correcto: pago → reserva (no existe "pendiente de pago")
 
-Solicita restablecimiento de contraseña. Envía email con link al frontend.
+La web no permite crear una reserva sin pagar. El flujo es:
 
-**Body:**
-```json
-{
-  "email": "user@example.com"
-}
-```
+1. El usuario elige cancha, fecha y horario.
+2. El backend verifica disponibilidad (sin bloqueo aún).
+3. El usuario es redirigido a la pasarela de pago (Mercado Pago / otro).
+3. El pago se procesa.
+4. **Solo si el pago es exitoso**, el backend ejecuta la transacción que crea la reserva:
+   - Lock transaccional (`SELECT FOR UPDATE`)
+   - Verifica disponibilidad de nuevo (entre el paso 2 y ahora alguien más pudo haber pagado)
+   - Inserta la reserva
+   - Confirma la transacción
 
-El email contiene un link:
-```
-{FRONTEND_URL}/reset-password?token=eyJhbGciOiJI...
-```
+### 5.1 Prevención de doble pago (race condition crítica)
+El momento de mayor riesgo es cuando dos usuarios pagan **casi al mismo tiempo** para el mismo slot. La solución está toda del lado del backend:
 
-**El frontend DEBE tener una ruta `/reset-password?token=...`** con un formulario para ingresar la nueva contraseña.
+- Usar una **transacción serializable o `SELECT FOR UPDATE`** que envuelva: verificar cruce + insertar reserva.
+- Si la segunda transacción falla por violación de unicidad o cruce, el pago se revierte (reembolso) o se notifica al usuario que el slot ya fue tomado.
 
----
+### 5.2 Notificación al dueño al crear/cancelar reserva
+- El dueño debe recibir la actualización en tiempo real (WebSocket room de su local).
+- También debería poder ver en el dashboard las reservas activas sin recargar.
 
-### 7. `POST /api/reset-password`
-
-Envía la nueva contraseña con el token recibido por email.
-
-**Body:**
-```json
-{
-  "token": "eyJhbGciOiJI...",
-  "newPassword": "nueva123"
-}
-```
-
-**Response 200:**
-```json
-{
-  "message": "¡Contraseña actualizada con éxito! Ya puedes iniciar sesión."
-}
-```
-
-**Response 401 (token expirado):**
-```json
-{
-  "status": "error",
-  "error": "El enlace ha expirado."
-}
-```
-
-**Response 401 (token ya usado):**
-```json
-{
-  "status": "error",
-  "error": "Token inválido o ya utilizado. Solicita uno nuevo."
-}
-```
+### 5.3 Sincronización del estado de mantenimiento
+- Cuando el dueño marca una cancha en mantenimiento, el backend debe:
+  1. Emitir evento WebSocket a todos los clientes viendo esa cancha.
+  2. Rechazar nuevas reservas en esa cancha (`POST /api/reservas`).
+  3. No cancelar reservas existentes (el dueño debe cancelarlas manualmente si corresponde).
 
 ---
 
-### 8. `GET /api/validate-session`
+## 6. Resumen de endpoints afectados
 
-Verifica que el token aún sea válido (activo, email verificado, no cerrado globalmente).
-
-**Auth:** Requerida (Bearer token)
-
-**Response 200:**
-```json
-{
-  "status": "valid",
-  "usuario": {
-    "id": "USR-999001",
-    "nombre": "Ricardo",
-    "rol": "DUENO"
-  }
-}
-```
+| Endpoint | Cambio requerido |
+|----------|------------------|
+| `POST /api/register` | Validar fuerza de contraseña server-side |
+| `POST /api/cambiar-contrasena` | Validar fuerza de contraseña server-side |
+| `POST /api/login` | Bloqueo por intentos (ya existe), devolver `emailNoVerificado` (ya existe) |
+| `POST /api/logout` | Invalidar refresh token en DB |
+| `POST /api/refresh` | Rechazar si refresh token está revocado |
+| `GET /api/validate-session` | (ya existe) |
+| `POST /api/reservas` | Validar mantenimiento, cruce horario, lock transaccional, versión optimista |
+| `WebSocket /socket.io/` | Nuevo — emitir eventos de reservas, mantenimiento, bloqueo |
 
 ---
 
-### 9. `POST /api/logout`
+## 7. Prioridad sugerida
 
-Cierra sesión globalmente (invalida todos los tokens del usuario).
-
-**Body:**
-```json
-{
-  "refreshToken": "eyJhbGciOiJI..."
-}
-```
-
----
-
-### 10. `POST /api/refresh`
-
-Renueva el access token usando el refresh token.
-
-**Body:**
-```json
-{
-  "refreshToken": "eyJhbGciOiJI..."
-}
-```
-
-**Response 200:**
-```json
-{
-  "status": "success",
-  "accessToken": "eyJhbGciOiJI..."
-}
-```
-
----
-
-### 11. `POST /api/jugador/cambiar-contrasena`
-
-Cambiar o establecer contraseña. **Se comporta diferente según el tipo de usuario.**
-
-**Auth:** Requerida (Bearer token)
-
-**Body:**
-```json
-{
-  "currentPassword": "miClaveActual",
-  "newPassword": "miNuevaClave",
-  "confirmNewPassword": "miNuevaClave"
-}
-```
-
-#### Comportamiento:
-
-| Tipo de usuario | `currentPassword` | Resultado |
-|----------------|-------------------|-----------|
-| Registro normal (tiene hash bcrypt) | **Obligatorio** — se valida contra la BD | Se actualiza la contraseña |
-| Google Auth (`PSW_HSH = 'GOOGLE_AUTH'`) | **Se ignora** — no es necesario enviarlo | Se establece la contraseña por primera vez |
-
-**Response 200 (usuario normal):**
-```json
-{
-  "status": "success",
-  "mensaje": "Contraseña actualizada correctamente.",
-  "esPrimeraVez": false
-}
-```
-
-**Response 200 (usuario Google estableciendo contraseña):**
-```json
-{
-  "status": "success",
-  "mensaje": "Contraseña establecida correctamente. Ya puedes iniciar sesión con tu nueva contraseña.",
-  "esPrimeraVez": true
-}
-```
-
-#### Instrucciones para el frontend:
-
-1. **Detectar si es cuenta Google** — al hacer login, guardar el método (`'google'` o `'email'`).
-2. **Si es Google:** mostrar formulario como "Establecer contraseña", sin campo `currentPassword`.
-3. **Si es normal:** mostrar formulario como "Cambiar contraseña", con `currentPassword` + `newPassword` + `confirmNewPassword`.
-
----
-
-## Google Sign-In — Inicialización (GIS)
-
-El error `google.accounts.id.initialize() is called multiple times` y el `The given origin is not allowed for the given client ID` son **del frontend**. El backend recibe el `idToken` y responde OK.
-
-**Problema:** El frontend llama `google.accounts.id.initialize()` múltiples veces (cada llamada pisa la anterior y deja parámetros como `undefined`).
-
-**Solución en el frontend:**
-
-```javascript
-// ✅ CORRECTO — inicializar UNA SOLA VEZ
-let gsiInitialized = false;
-
-function initGoogleSignIn() {
-  if (gsiInitialized) return;
-  gsiInitialized = true;
-
-  google.accounts.id.initialize({
-    client_id: '114641106525-...apps.googleusercontent.com',
-    callback: handleGoogleCredentialResponse
-  });
-
-  google.accounts.id.renderButton(
-    document.getElementById('googleButton'),
-    { theme: 'outline', size: 'large', text: 'signin_with' }
-  );
-}
-```
-
-**Reglas:**
-1. Llamar `google.accounts.id.initialize()` **una sola vez** en toda la vida de la app.
-2. No llamarlo dentro de efectos que se ejecuten múltiples veces (como `useEffect` sin dependencias o en cada render).
-3. Si el componente de login se monta/desmonta, usar un flag para no reinicializar.
-4. `google.accounts.id.cancel()` al desmontar si usás One Tap, pero no antes de renderizar el botón.
-
-**Ejemplo en React:**
-```javascript
-// ✅ GUARDAR REFERENCIA CON useRef
-const initialized = useRef(false);
-
-useEffect(() => {
-  if (initialized.current) return;
-  initialized.current = true;
-
-  google.accounts.id.initialize({
-    client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
-    callback: (response) => {
-      // Enviar response.credential al backend POST /api/auth/google
-    }
-  });
-}, []);
-```
-
-**En Vite**, el Client ID debe estar en `VITE_GOOGLE_CLIENT_ID` (con prefijo `VITE_`), no en `.env` normal.
-
----
-
-## Resumen de cambios respecto a la versión anterior
-
-| Endpoint | Cambio |
-|----------|--------|
-| `POST /api/register` | Ahora `emailVerificado: false`, envía correo de verificación en vez de bienvenida |
-| `GET /api/verify-email` | **NUEVO** — Verifica token, redirige al frontend |
-| `POST /api/resend-verification` | **NUEVO** — Reenvía link de verificación |
-| `POST /api/login` | **NUEVO** — Devuelve `emailNoVerificado: true` si no verificó |
-| `POST /api/auth/google` | **MEJORA** — Marca email como verificado automáticamente |
-| `POST /api/reset-password` | **MEJORA** — Valida token contra BD, lo marca como usado |
-| `GET /api/validate-session` | **MEJORA** — Ahora devuelve datos del usuario |
-| Middleware `verificarToken` | **MEJORA** — Valida estado activo + email verificado en cada request |
-| `POST /api/jugador/cambiar-contrasena` | **MEJORA** — Soporta cuentas Google sin contraseña actual |
-| `POST /api/register` (rol) | **FIX** — Mapea `JUGADOR`/`CLIENTE` a `CLIENTE`, `DUENO`/`DUEÑO` a `DUENO` |
-
-## Rutas que el frontend debe implementar
-
-| Ruta | Propósito | Query params |
-|------|-----------|-------------|
-| `/email-verificado` | Mostrar resultado de verificación | `status=success\|error`, `reason=...` |
-| `/reset-password` | Formulario para nueva contraseña | `token=...` |
+1. **Alta** — Validación de contraseñas en backend (seguridad básica)
+2. **Alta** — Prevención de doble reserva y cruce horario en `POST /api/reservas` (integridad del negocio)
+3. **Alta** — Mantenimiento de cancha/local validado en backend
+4. **Media** — Invalidación de refresh token en logout
+5. **Media** — WebSockets para tiempo real
+6. **Baja** — Historial de contraseñas y bloqueo por comunes
