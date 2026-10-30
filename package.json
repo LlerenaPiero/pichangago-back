@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "jest --verbose",
     "k6:dashboard": "k6 run tests/k6/dueno-dashboard.js",
     "k6:dashboard:prod": "k6 run -e BASE_URL=https://pichangago-back.onrender.com tests/k6/dueno-dashboard.js",
     "k6:dashboard:export": "k6 run --summary-export evidencias/04-k6/dueno-dashboard-summary.json tests/k6/dueno-dashboard.js",
@@ -45,6 +45,8 @@
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
-    "sonar-scanner": "^3.1.0"
+    "jest": "^30.5.1",
+    "sonar-scanner": "^3.1.0",
+    "supertest": "^7.2.2"
   }
 }

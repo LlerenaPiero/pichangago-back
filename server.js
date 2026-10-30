@@ -896,4 +896,12 @@ app.use((req, res) => {
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => { console.log(`🚀 Servidor backend blindado corriendo en puerto ${PORT}`); });
+if (require.main === module) {
+  // Solo escucha el puerto si ejecutamos "node server.js" directamente
+  server.listen(PORT, () => { 
+      console.log(`🚀 Servidor backend blindado corriendo en puerto ${PORT}`); 
+  });
+}
+
+// Exportamos la app para que Supertest pueda usarla en las pruebas
+module.exports = app;
