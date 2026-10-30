@@ -30,27 +30,22 @@ if (!process.env.JWT_SECRET || !process.env.REFRESH_TOKEN_SECRET) {
   process.exit(1);
 }
 
-const ORIGINS_ALLOWED = [
-  ...new Set([
-    ...(process.env.CORS_ORIGINS || process.env.FRONTEND_URL || '')
-      .split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean),
-    'https://pichangago-front.vercel.app',
-    'http://localhost:5173',
-    'http://localhost:3000'
-  ])
-];
 const BASE_URL = ORIGINS_ALLOWED[0];
 
-const io = new Server(server, { cors: { origin: ORIGINS_ALLOWED } });
+// Los deploys de Vercel de tu equipo cambian de URL en cada despliegue (el hash)
+const VERCEL_PREVIEW = /^https:\/\/pichangago-frontend-[a-z0-9-]+-go-pichanga-s-projects\.vercel\.app$/;
+const isAllowedOrigin = (origin) =>
+  !!origin && (ORIGINS_ALLOWED.includes(origin) || VERCEL_PREVIEW.test(origin));
 
-app.use(generalLimiter);
+const io = new Server(server, {
+  cors: { origin: (origin, cb) => cb(null, !origin || isAllowedOrigin(origin)) }
+});
 
-const helmet = require('helmet');
-app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
-
+// CORS va ANTES del limitador: así, si el limitador responde 429,
+// la respuesta igual lleva las cabeceras y el navegador muestra el error real
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin && ORIGINS_ALLOWED.includes(origin)) {
+  if (isAllowedOrigin(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
@@ -62,8 +57,13 @@ app.use((req, res, next) => {
   }
   next();
 });
-app.use(express.json({ limit: '10mb' }));
 
+app.use(generalLimiter);
+
+const helmet = require('helmet');
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+
+app.use(express.json({ limit: '10mb' }));
 const sqlConfig = {
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
