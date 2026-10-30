@@ -440,11 +440,17 @@ app.post('/api/login', authLimiter, loginRules, async (req, res) => {
   const { email, password } = req.body;
   try {
     const ahora = Date.now();
-    if (intentosUsuarios[email] && intentosUsuarios[email].intentos >= 3) {
-      const tb = (ahora - intentosUsuarios[email].fechaBloqueo) / 1000 / 60;
-      if (tb < 15) return res.status(403).json({ status: 'error', error: `Bloqueado. Intenta en ${Math.ceil(15 - tb)} min.` });
-      else delete intentosUsuarios[email];
-    }
+   if (intentosUsuarios[email] && intentosUsuarios[email].intentos >= 3) {
+  const tb = (ahora - intentosUsuarios[email].fechaBloqueo) / 1000 / 60;
+  if (tb < 15) {
+    return res.status(403).json({ 
+      status: 'error', 
+      error: `Bloqueado. Intenta en ${Math.ceil(15 - tb)} min.` 
+    });
+  } else {
+    delete intentosUsuarios[email];
+  }
+}
 
     await poolConnect;
     const result = await appPool.request()
